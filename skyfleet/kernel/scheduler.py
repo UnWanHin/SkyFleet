@@ -20,6 +20,9 @@ class Scheduler:
         self._tie = 0
         self._now = 0.0
         self._handlers: dict[str, list[Handler]] = {}
+        #: 在每个虚拟时刻的所有事件处理完之后回调。
+        #: 共享信道的竞争结算依赖它：同一时刻的并发发送必须一起判定。
+        self.on_timestamp_end: Callable[[float], None] | None = None
 
     @property
     def now(self) -> float:
@@ -52,7 +55,8 @@ class Scheduler:
         return len(self._heap)
 
     def run(self, until: float | None = None) -> None:
-        """事件循环。until 为虚拟时间上界（含该时刻的事件不执行）。"""
+        """事件循环。until 为虚拟时间上界（晚于该时刻的事件不执行）。"""
+        current: float | None = None
         while self._heap:
             t, _, ev = self._heap[0]
             if until is not None and t > until:
@@ -60,6 +64,15 @@ class Scheduler:
             heapq.heappop(self._heap)
             if ev.cancelled:
                 continue
+            if current is not None and t != current:
+                self._end_timestamp(current)
+            current = t
             self._now = t
             for handler in self._handlers.get(ev.kind, ()):
                 handler(ev)
+        if current is not None:
+            self._end_timestamp(current)
+
+    def _end_timestamp(self, t: float) -> None:
+        if self.on_timestamp_end is not None:
+            self.on_timestamp_end(t)

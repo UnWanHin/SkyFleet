@@ -87,6 +87,34 @@ class TestScheduling(unittest.TestCase):
         self.assertEqual(seen, [1, 2, 3])
 
 
+class TestTimestampHook(unittest.TestCase):
+    """信道竞争需要在"同一时刻的事件处理完之后"统一结算。"""
+
+    def test_on_timestamp_end_fires_once_per_timestamp(self):
+        s, marks = Scheduler(), []
+        s.on_timestamp_end = marks.append
+        s.subscribe("e", lambda ev: None)
+        s.schedule_at(1.0, "e")
+        s.schedule_at(1.0, "e")
+        s.schedule_at(2.0, "e")
+        s.run()
+        self.assertEqual(marks, [1.0, 2.0])
+
+    def test_hook_fires_for_final_timestamp(self):
+        s, marks = Scheduler(), []
+        s.on_timestamp_end = marks.append
+        s.subscribe("e", lambda ev: None)
+        s.schedule_at(7.0, "e")
+        s.run()
+        self.assertEqual(marks, [7.0])
+
+    def test_no_hook_is_fine(self):
+        s = Scheduler()
+        s.subscribe("e", lambda ev: None)
+        s.schedule_at(1.0, "e")
+        s.run()
+
+
 class TestDeterminism(unittest.TestCase):
     def test_two_runs_of_same_schedule_are_identical(self):
         def build():
