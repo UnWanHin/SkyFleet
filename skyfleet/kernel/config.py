@@ -49,6 +49,14 @@ class SimConfig:
     initial_energy: float = 100.0
     min_energy_for_task: float = 20.0
 
+    #: 故障注入：[[node_id, 静默起始时刻], ...]。
+    #: 报告 R0-R3 要求"失效检测 -> 判定 -> 重派 -> 恢复"这条链可复现，
+    #: 因此把它做成**场景文件的一部分**，而不是只存在于测试代码里——
+    #: 答辩现场能一键跑出来，才有说服力。
+    kills: tuple[tuple[str, float], ...] = ()
+    #: 故障恢复：[[node_id, 重新入网时刻], ...]
+    revives: tuple[tuple[str, float], ...] = ()
+
     # 协议节奏
     heartbeat_period: float = 1.0
     telemetry_period: float = 0.5
@@ -114,6 +122,9 @@ class SimConfig:
 
 _TUPLE_FIELDS = ("height_range", "flight_altitude", "delivery_altitude")
 
+#: 这些字段是"列表的列表"，需要把内层也转成元组
+_PAIR_LIST_FIELDS = ("kills", "revives")
+
 
 def load_config(path: str | Path) -> SimConfig:
     """加载场景配置。未知字段报错，缺失字段用默认值。"""
@@ -137,6 +148,9 @@ def load_config(path: str | Path) -> SimConfig:
     for key in _TUPLE_FIELDS:
         if key in raw:
             raw[key] = tuple(raw[key])
+    for key in _PAIR_LIST_FIELDS:
+        if key in raw:
+            raw[key] = tuple((str(n), float(t)) for n, t in raw[key])
 
     return SimConfig(**raw)
 

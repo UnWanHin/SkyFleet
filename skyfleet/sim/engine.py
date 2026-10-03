@@ -46,6 +46,7 @@ EV_LEADER_CHECK = "leader_check"
 EV_RETRY = "retry"
 EV_RX = "rx"
 EV_KILL = "kill"
+EV_REVIVE = "revive"
 EV_CHANNEL = "chan"
 
 #: 广播目的地址。主节点心跳用一条广播覆盖全员，而不是逐节点单播
@@ -97,6 +98,7 @@ class Engine:
 
         self._built = False
         self._kills: list[tuple[str, float]] = []
+        self._revives: list[tuple[str, float]] = []
         self._tx_index: dict[int, _Tx] = {}
         self._slot_ticks: set[int] = set()
 
@@ -193,6 +195,14 @@ class Engine:
         """故障注入：让某节点在 t 时刻起彻底静默。"""
         self._kills.append((node_id, t))
 
+    def schedule_revive(self, node_id: str, t: float) -> None:
+        """故障恢复：让静默的节点在 t 时刻以**新会话**重新入网。
+
+        必须换会话：身份层用 session_id 区分重连前后，沿用旧会话会让
+        主节点无法区分"迟到的旧消息"和"节点真的回来了"。
+        """
+        self._revives.append((node_id, t))
+
     def run(self) -> str:
         if not self._built:
             self.build()
@@ -217,6 +227,7 @@ class Engine:
         self.scheduler.subscribe(EV_RETRY, self._on_retry)
         self.scheduler.subscribe(EV_RX, self._on_rx)
         self.scheduler.subscribe(EV_KILL, self._on_kill)
+        self.scheduler.subscribe(EV_REVIVE, self._on_revive)
         self.scheduler.subscribe(EV_CHANNEL, self._on_channel)
 
     def _start(self) -> None:
@@ -274,8 +285,13 @@ class Engine:
             self.scheduler.schedule_at(
                 self._jitter(node_id, "retry") * cfg.retry_interval
                 + cfg.retry_interval, EV_RETRY, agent)
+        # 场景文件里的故障注入/恢复，与代码里 schedule_kill 的调用合并
+        self._kills.extend(cfg.kills)
+        self._revives.extend(cfg.revives)
         for node_id, t in self._kills:
             self.scheduler.schedule_at(t, EV_KILL, node_id)
+        for node_id, t in self._revives:
+            self.scheduler.schedule_at(t, EV_REVIVE, node_id)
 
     def _jitter(self, node_id: str, stream: str) -> float:
         """[0,1) 抖动，用于确定各节点周期事件的初始相位。
@@ -841,12 +857,36 @@ class Engine:
     def _on_kill(self, ev: Event) -> None:
         node_id = ev.payload
         agent = self.agents.get(node_id)
-        if agent is None:
-            return
+        if agent is None or not agent.alive:
+            return          # 幂等：重复的注入不该写两条 NODE_LEAVE
         agent.alive = False
         assert self.log is not None
         self.log.write(EventKind.NODE_LEAVE, ev.t, node_id=node_id,
                        cause="SILENT")
+
+    def _on_revive(self, ev: Event) -> None:
+        """节点以新会话重新入网。"""
+        node_id = ev.payload
+        agent = self.agents.get(node_id)
+        if agent is None or agent.alive:
+            return
+        agent.alive = True
+        agent.session_id = self.identity.join(node_id, ev.t)
+        agent.leader_epoch = self.agents[self.config.leader_id].leader_epoch
+        # 重新入网必须让主节点接受新会话，否则此后该节点的消息全被挡在
+        # 会话校验外——"恢复了但永远回不来"是最难查的一类错误。
+        # 同时**作废旧会话**：否则重连前滞留在信道上的旧消息仍会被接受。
+        leader_view = self.agents[self.config.leader_id].view
+        leader_view.sessions = {
+            sid for sid in leader_view.sessions
+            if not sid.startswith(f"{node_id}#")}
+        leader_view.sessions.add(agent.session_id)
+        assert self.log is not None
+        self.log.write(EventKind.NODE_JOIN, ev.t, node_id=node_id,
+                       session_id=agent.session_id, cause="REVIVE")
+        self.scheduler.schedule_at(
+            ev.t + self._jitter(node_id, "hb") * self.config.heartbeat_period,
+            EV_HEARTBEAT, agent)
 
     # ================= 供主节点处理器接线 =================
 
