@@ -53,6 +53,16 @@ DEADLINE_BY_REL: dict[Rel, float] = {
     Rel.R3: 0.05,
 }
 
+#: 只有任务范围的消息才受 mission_version 约束。
+#:
+#: 这条区分是必须的：心跳与遥测不属于任何一次任务计划。如果对它们也做
+#: 版本比较，一次任务重派（mission_version +1）就会让尚未收到新版本的
+#: 节点的心跳全部被误判为过期，进而把健康节点判成故障——正好违背报告
+#: §2.2.1"不得把单次丢包等同于故障"的初衷。
+MISSION_SCOPED: frozenset[str] = frozenset({
+    "TASK_ASSIGN", "TASK_REASSIGN", "DELIVERY_CONFIRM",
+})
+
 _DEFAULT_TTL = 8
 _msg_counter = itertools.count(1)
 

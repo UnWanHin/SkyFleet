@@ -17,7 +17,7 @@ import math
 from dataclasses import dataclass
 
 
-class MemberStatus(enum.Enum):
+class MemberStatus(str, enum.Enum):
     ONLINE = "ONLINE"
     DEGRADED = "DEGRADED"
     SUSPECT = "SUSPECT"

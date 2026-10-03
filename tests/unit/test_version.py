@@ -49,13 +49,34 @@ class TestAcceptRules(unittest.TestCase):
         self.assertIs(accept(m, self.view, self.dedup, 0.1), AcceptDecision.DEDUP)
 
     def test_rejects_stale_seq(self):
-        self.view.last_seq[("L", 2, 5)] = 9
+        self.view.last_seq[("L", "TASK_ASSIGN", 2, 5)] = 9
         m = make(leader_epoch=2, mission_version=5, seq=9, session_id="L#1")
         self.assertIs(accept(m, self.view, self.dedup, 0.0), AcceptDecision.STALE_SEQ)
 
     def test_accepts_higher_seq(self):
-        self.view.last_seq[("L", 2, 5)] = 9
+        self.view.last_seq[("L", "TASK_ASSIGN", 2, 5)] = 9
         m = make(leader_epoch=2, mission_version=5, seq=10, session_id="L#1")
+        self.assertIs(accept(m, self.view, self.dedup, 0.0), AcceptDecision.ACCEPT)
+
+    def test_seq_is_scoped_per_message_stream(self):
+        """序列号只在同一源的同一条消息流内可比。
+
+        心跳与遥测共用一个发送计数器，但互不排序。若把 msg_type 排除在
+        序列键外，一条乱序到达的遥测就会让紧随其后的心跳被判为过期，
+        凭空制造一次"心跳丢失"，进而把健康节点误判为故障。
+        """
+        self.view.last_seq[("L", "TELEMETRY", 2, 5)] = 99
+        m = make(leader_epoch=2, mission_version=5, seq=1, session_id="L#1")
+        self.assertIs(accept(m, self.view, self.dedup, 0.0), AcceptDecision.ACCEPT)
+
+    def test_status_messages_ignore_mission_version(self):
+        """心跳/遥测不属于任何任务计划，不得受 mission_version 约束。
+
+        否则一次任务重派就会让尚未收到新版本的节点心跳全部失效。
+        """
+        self.view.mission_version = 9
+        m = Msg.new("HEARTBEAT", src="L", dst="S1", t=0.0, seq=1,
+                    session_id="L#1", leader_epoch=2, mission_version=0)
         self.assertIs(accept(m, self.view, self.dedup, 0.0), AcceptDecision.ACCEPT)
 
     def test_accept_updates_view(self):
@@ -63,7 +84,7 @@ class TestAcceptRules(unittest.TestCase):
         accept(m, self.view, self.dedup, 0.0)
         self.assertEqual(self.view.leader_epoch, 4)
         self.assertEqual(self.view.mission_version, 7)
-        self.assertEqual(self.view.last_seq[("L", 4, 7)], 3)
+        self.assertEqual(self.view.last_seq[("L", "TASK_ASSIGN", 4, 7)], 3)
 
     def test_reject_does_not_mutate_view(self):
         before = (self.view.leader_epoch, self.view.mission_version)

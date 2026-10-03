@@ -29,7 +29,10 @@ class SimConfig:
     blocks: int = 3
     gap: float = 20.0
     height_range: tuple[float, float] = (30.0, 120.0)
-    flight_altitude: tuple[float, float] = (30.0, 120.0)
+    #: 巡航高度默认高于绝大多数楼顶。这是基线场景"基本连通"的前提：
+    #: 若巡航高度低于楼高，几何遮挡会让整个集群近乎完全分区，
+    #: 那时观察到的就不是"遮挡导致的劣化"，而是"网络不存在"。
+    flight_altitude: tuple[float, float] = (80.0, 150.0)
     node_speed: float = 12.0
 
     # 集群

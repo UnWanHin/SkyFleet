@@ -21,10 +21,11 @@ from typing import Any, Iterator
 class EventLog:
     """追加写入的 JSONL 日志。"""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, append: bool = True) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._handle = self.path.open("a", encoding="utf-8")
+        #: append=False 用于开始一次新的仿真运行（截断旧日志）
+        self._handle = self.path.open("a" if append else "w", encoding="utf-8")
 
     def write(self, kind: Any, t: float, **fields: Any) -> None:
         record: dict[str, Any] = {

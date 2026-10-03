@@ -8,7 +8,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 
-from skyfleet.protocol.message import Msg
+from skyfleet.protocol.message import MISSION_SCOPED, Msg
 
 
 class AcceptDecision(enum.Enum):
@@ -30,8 +30,8 @@ class LocalView:
     mission_version: int = 0
     route_version: int = 0
     sessions: set[str] = field(default_factory=set)
-    #: (src, leader_epoch, mission_version) -> 已见最大 seq
-    last_seq: dict[tuple[str, int, int], int] = field(default_factory=dict)
+    #: (源, 消息类型, 任期, 任务版本) -> 已见最大 seq
+    last_seq: dict[tuple[str, str, int, int], int] = field(default_factory=dict)
 
 
 class DedupTable:
@@ -76,12 +76,16 @@ def accept(msg: Msg, view: LocalView, dedup: DedupTable,
         return AcceptDecision.STALE_EPOCH
     if view.sessions and msg.session_id not in view.sessions:
         return AcceptDecision.STALE_SESSION
-    if msg.mission_version < view.mission_version:
+    if (msg.msg_type in MISSION_SCOPED
+            and msg.mission_version < view.mission_version):
         return AcceptDecision.STALE_VERSION
     if msg.operation_id is not None and dedup.seen(msg.operation_id, t):
         return AcceptDecision.DEDUP
 
-    key = (msg.src, msg.leader_epoch, msg.mission_version)
+    # 序列号只在**同一个源的同一条消息流**内可比。心跳与遥测共用一个
+    # 发送序号，但它们互不排序；若把 msg_type 排除在键外，一条乱序到达的
+    # 遥测就会把紧随其后的心跳误判为过期，凭空造出一次"心跳丢失"。
+    key = (msg.src, msg.msg_type, msg.leader_epoch, msg.mission_version)
     previous = view.last_seq.get(key)
     if previous is not None and msg.seq <= previous:
         return AcceptDecision.STALE_SEQ
