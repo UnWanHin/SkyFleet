@@ -105,23 +105,26 @@ def _cmd_all(args) -> int:
     config = _load(argparse.Namespace(config=args.config, seed=args.seed,
                                       duration=args.duration, log=None))
     out = Path(args.out)
-    config.log_path = str(out / "logs" / "baseline.jsonl")
+    # 产物按**场景名**分目录。原先硬编码成 baseline，三个场景跑下来会互相
+    # 覆盖：读 out/logs/baseline.jsonl 拿到的其实是最后一个场景的结果。
+    name = Path(config.log_path).stem
+    config.log_path = str(out / "logs" / f"{name}.jsonl")
     log_path = Engine(config).run()
     print(f"仿真完成：{config.duration:g} s（种子 {config.seed}）")
 
     from skyfleet.observe.metrics import compute_metrics, format_report
     report = format_report(compute_metrics(log_path))
     (out / "logs").mkdir(parents=True, exist_ok=True)
-    (out / "logs" / "baseline.metrics.txt").write_text(report + "\n",
-                                                       encoding="utf-8")
+    (out / "logs" / f"{name}.metrics.txt").write_text(report + "\n",
+                                                     encoding="utf-8")
     print(report)
 
     from skyfleet.viz.plots import render_all
-    for path in render_all(log_path, str(out / "figures")):
+    for path in render_all(log_path, str(out / "figures" / name)):
         print(f"图表：{path}")
 
     from skyfleet.viz.replay_html import render_replay
-    print(f"回放页面：{render_replay(log_path, str(out / 'replay' / 'replay.html'))}")
+    print(f"回放页面：{render_replay(log_path, str(out / 'replay' / f'{name}.html'))}")
     return 0
 
 
@@ -152,6 +155,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except ValueError as exc:
         print(f"错误：{exc}", file=sys.stderr)
+        return 1
+    except ImportError as exc:
+        # 仿真核心零依赖，只有画图需要 matplotlib。缺依赖时给出可照做的
+        # 命令，而不是把 import 的堆栈丢给使用者。
+        print(f"错误：缺少可选依赖 {exc.name or exc}。\n"
+              f"      画图与回放需要 matplotlib："
+              f"python3 -m pip install matplotlib", file=sys.stderr)
         return 1
 
 

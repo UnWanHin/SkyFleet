@@ -1,7 +1,10 @@
 __pycache__/
 *.py[cod]
 .venv/
-out/logs/*.jsonl
-out/figures/*.png
-out/replay/*.html
 .pytest_cache/
+
+# 仿真产物：体积大、可由命令完整重建，不入库。
+# 但指标文本与 SVG 矢量图入库——它们是报告直接引用的交付物。
+out/logs/*.jsonl
+out/figures/**/*.png
+out/replay/*.html
