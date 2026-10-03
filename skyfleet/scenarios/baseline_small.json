@@ -6,8 +6,10 @@
   "area": 500.0,
   "blocks": 3,
   "gap": 20.0,
-  "height_range": [30.0, 120.0],
-  "flight_altitude": [80.0, 150.0],
+  "height_range": [50.0, 110.0],
+  "flight_altitude": [110.0, 160.0],
+  "cruise_altitude": 140.0,
+  "delivery_altitude": [80.0, 110.0],
   "node_speed": 12.0,
 
   "leader_id": "L",
@@ -26,6 +28,9 @@
   "interference_range_m": 300.0,
   "max_link_range": 800.0,
   "loss_threshold": 0.5,
+  "slot_duration": 0.002,
+  "access_jitter": 0.05,
+  "relay_direct_threshold": 0.6,
   "retry_interval": 1.0,
 
   "q0_rate": 5.0,

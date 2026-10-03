@@ -28,11 +28,17 @@ class SimConfig:
     area: float = 500.0
     blocks: int = 3
     gap: float = 20.0
-    height_range: tuple[float, float] = (30.0, 120.0)
-    #: 巡航高度默认高于绝大多数楼顶。这是基线场景"基本连通"的前提：
-    #: 若巡航高度低于楼高，几何遮挡会让整个集群近乎完全分区，
-    #: 那时观察到的就不是"遮挡导致的劣化"，而是"网络不存在"。
-    flight_altitude: tuple[float, float] = (80.0, 150.0)
+    #: 楼高带。高于街道、低于巡航高度，是"城市峡谷"的来源。
+    height_range: tuple[float, float] = (50.0, 110.0)
+    #: 节点初始所在高度带（高于多数楼顶）
+    flight_altitude: tuple[float, float] = (110.0, 160.0)
+    #: 巡航高度：在两个任务点之间转场时使用，高于全部楼顶
+    cruise_altitude: float = 140.0
+    #: 取餐点/投递点的高度带：位于街道峡谷内，低于楼顶。
+    #: "高空巡航 + 低空投递"让遮挡成为**每次投递都会短暂发生**的现象，
+    #: 而不是"整段航程全遮挡"或"完全无遮挡"的二值结果——后者既不符合
+    #: 城市峡谷的物理，也让链路劣化与恢复的分析无从做起。
+    delivery_altitude: tuple[float, float] = (80.0, 110.0)
     node_speed: float = 12.0
 
     # 集群
@@ -48,13 +54,29 @@ class SimConfig:
     telemetry_period: float = 0.5
     motion_period: float = 0.1
     queue_depth: int = 200
+    #: 每次周期发送的时钟漂移抖动（秒，±）。
+    #: 没有它，各节点的发送时刻是严格周期的固定相位，彼此几乎永不重叠——
+    #: 于是"信道竞争"这个报告要求观察的现象会退化成恒等于 0。
+    #: 加入漂移后到达过程接近随机的 ALOHA 型竞争。
+    access_jitter: float = 0.05
 
     # 信道
     channel_rate_bps: float = 2_000_000
     interference_range_m: float = 300.0
     max_link_range: float = 800.0
     loss_threshold: float = 0.5
+    #: 直连质量低于该值时才考虑改走中继。
+    #: 中继是"直连不够用时的补线"，不是"略微更好就换"的优选：若只要
+    #: 中继比直连好一点就切过去，每一次心跳都会多占用一跳的空口时间，
+    #: 信道负载凭空翻倍，冲突率随之被自己推高——那是协议自己制造的拥塞。
+    relay_direct_threshold: float = 0.6
     retry_interval: float = 1.0
+    #: 信道时隙长度。竞争以时隙为单位判定：同一时隙内互相在干扰范围内的
+    #: 并发发送全部冲突。没有时隙，浮点时刻下冲突概率为零。
+    slot_duration: float = 0.002
+    #: 投递确认的有效期。比 R2 的默认 1 s 长：投递确认是业务闭环，
+    #: 值得用更长的时间窗换取"最终一定送达或被判定失败"。
+    confirm_deadline: float = 5.0
 
     # 限流
     q0_rate: float = 5.0
@@ -90,7 +112,7 @@ class SimConfig:
         return 1 + self.slaves + self.relays
 
 
-_TUPLE_FIELDS = ("height_range", "flight_altitude")
+_TUPLE_FIELDS = ("height_range", "flight_altitude", "delivery_altitude")
 
 
 def load_config(path: str | Path) -> SimConfig:

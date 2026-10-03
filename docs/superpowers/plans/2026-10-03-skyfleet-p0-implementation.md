@@ -1516,3 +1516,36 @@ git add -A && git commit -m "feat(world): 共享信道竞争与冲突模型"
 `LinkQuality` 在 Task 11 定义、Task 12/17 消费，字段名一致；`MemberStatus`/`MembershipParams`
 在 Task 7 定义并在 Task 17/18 消费，名称一致；调度器 API（`schedule_at`/`schedule`/`subscribe`/
 `run`）在 Task 2 定义，Task 17–19 一律沿用，无别名。
+
+---
+
+## 附：实现验收记录（2026-10-04）
+
+Task 1–23 全部完成。测试命令与结果：
+
+```
+python3 -m unittest discover -s tests -t .          # 系统 Python，跳过 5 个 matplotlib 测试
+.venv/bin/python -m unittest discover -s tests -t . # 含可视化，335 passed
+```
+
+端到端：
+
+```
+.venv/bin/python -m skyfleet.cli all --out out                              # 基线
+.venv/bin/python -m skyfleet.cli all \
+    --config skyfleet/scenarios/stress_canyon.json --out out                # 压力对照
+```
+
+确定性验收：同一 `master_seed` 连续两次运行的规范化日志 SHA-256 一致
+（基线种子 1：`6f40ceea3386dcea521e700cb4f0da0452a080a0a50ff6d09500ab1e195ce76f`）。
+
+**与计划的偏差**：实现过程中发现 11 处**模型/协议层面的缺陷**（不是调参），
+逐条记录在规格文档 §15，含理由、修正方式与实测数据。其中影响最大的三条：
+
+1. §15.1 信道未时隙化 → 冲突数恒为 0，"信道竞争"分析会整体失效；
+2. §15.8 投递确认未等 ACK → 任务完成率被钉死在"每节点恰好一个"（10/20）；
+3. §15.9 全程低空飞行 → 遮挡变成网络分区，而非可观测的劣化。
+
+对应的测试改动：`tests/unit/test_channel.py` 重写为时隙模型；
+`tests/unit/test_version.py` 的 `last_seq` 键由 3 元组改为 4 元组；
+`tests/unit/test_agent.py` 新增周期消息不重传、R2 登记重传两条。

@@ -12,6 +12,10 @@ from typing import Any
 
 from skyfleet.observe.log import read_log
 
+#: 广播目的地址，与 sim/engine.py 中的约定一致。
+#: 指标层只读日志，因此这里不 import 仿真层，避免观测反向依赖仿真。
+BROADCAST = "*"
+
 CONTROL_QOS = ("Q0", "Q1", "Q2")
 DATA_QOS = ("Q3", "Q4")
 
@@ -43,8 +47,22 @@ def _summary(values: list[float]) -> dict[str, float | int | None]:
     }
 
 
+def _fanout(event: dict[str, Any], node_ids_count: int) -> int:
+    """一条事件承载多少次"发送 × 接收端"配对。
+
+    单播为 1；广播为集群规模减一（不含发送者自己）。
+    """
+    if event.get("dst") == BROADCAST:
+        return max(0, node_ids_count - 1)
+    return 1
+
+
 def compute_metrics(log_path: str | Path) -> dict[str, Any]:
     events = list(read_log(log_path))
+
+    # 参与过发送或接收的节点数。广播心跳的"应收次数"是除发送者以外的
+    # 全部节点，因此需要先知道集群规模。
+    node_ids_count = len({e["node_id"] for e in events if e.get("node_id")})
 
     created: set[str] = set()
     delivered: set[str] = set()
@@ -77,7 +95,11 @@ def compute_metrics(log_path: str | Path) -> dict[str, Any]:
             delivered.add(event["task_id"])
         elif kind == "MSG_TX":
             qos = event.get("qos", "Q?")
-            tx_by_qos[qos] += 1
+            # 广播是**一次**发送、N 个接收端，因此它承载 N-1 次"应收"。
+            # 若分母只记 1 次，而丢弃侧按接收端逐条记，丢失率会算出
+            # 大于 100% 的数——那个数字没有意义，只会误导结论。
+            # 参考坐标系统一为"发送 × 接收端"配对。
+            tx_by_qos[qos] += _fanout(event, node_ids_count)
             bits = event.get("bits", 0)
             bytes_tx += bits // 8
             if qos in CONTROL_QOS:
@@ -89,10 +111,19 @@ def compute_metrics(log_path: str | Path) -> dict[str, Any]:
             if event.get("is_retry"):
                 retries += 1
                 retries_per_msg[event["msg_id"]] += 1
-            if event.get("msg_type") == "DELIVERY_CONFIRM":
+            # 只统计**源节点首发**：中继转发的副本会让"发送量"凭空翻几倍，
+            # 送达率也就跟着失真。转发量单独统计。
+            origin = event.get("hop", 0) == 0
+            if origin and event.get("msg_type") == "DELIVERY_CONFIRM":
                 confirm_tx += 1
-            elif event.get("msg_type") == "HEARTBEAT":
-                heartbeat_tx += 1
+            elif origin and event.get("msg_type") == "HEARTBEAT":
+                # 广播心跳是一次发送、N 个接收端。分母必须按**应收次数**
+                # 计（去掉发送者自己），否则 1 次广播对 N 次接收，
+                # 送达率会算出大于 100% 的荒谬值。
+                if event.get("dst") == BROADCAST:
+                    heartbeat_tx += max(0, node_ids_count - 1)
+                else:
+                    heartbeat_tx += 1
         elif kind == "MSG_RX":
             qos = event.get("qos", "Q?")
             rx_by_qos[qos] += 1
@@ -105,8 +136,16 @@ def compute_metrics(log_path: str | Path) -> dict[str, Any]:
         elif kind in ("MSG_DROP", "MSG_DUP"):
             reason = event.get("reason", "UNKNOWN")
             drop_reasons[reason] += 1
-            drop_by_qos[event.get("qos", "Q?")] += 1
-            drop_by_reason_qos[(reason, event.get("qos", "Q?"))] += 1
+            if event.get("stage") == "rx":
+                # 接收端侧失败：只影响这一个接收端
+                fanout = 1
+            else:
+                # 发送侧失败（冲突/遮挡于发射端）：整个广播帧被毁，
+                # 全部潜在接收端都没收到
+                fanout = _fanout(event, node_ids_count)
+            qos = event.get("qos", "Q?")
+            drop_by_qos[qos] += fanout
+            drop_by_reason_qos[(reason, qos)] += fanout
         elif kind == "MSG_FORWARD":
             forwarded += 1
         elif kind == "MSG_EXPIRE":
@@ -132,9 +171,15 @@ def compute_metrics(log_path: str | Path) -> dict[str, Any]:
             recoveries.append(back - failed_at)
 
     def loss_rate(qos_group: tuple[str, ...]) -> float | None:
-        sent = sum(tx_by_qos[q] for q in qos_group)
+        """丢失率 = 丢弃 / 尝试。
+
+        分母必须是**尝试发送次数**（成功 + 丢弃），不是成功次数。
+        用成功次数当分母，在链路很差时会算出大于 100% 的"丢失率"——
+        那个数字不是指标，是口径错误。
+        """
+        attempted = sum(tx_by_qos[q] + drop_by_qos[q] for q in qos_group)
         lost = sum(drop_by_qos[q] for q in qos_group)
-        return (lost / sent) if sent else None
+        return (lost / attempted) if attempted else None
 
     return {
         "events": len(events),

@@ -5,10 +5,10 @@
 
 三条贯穿全案的设计约束在这里落地：
 1. **确定性**：所有随机性来自 RngRegistry 的具名独立流；周期性事件带
-   确定性抖动，避免所有节点在同一虚拟时刻齐发（那会让"冲突"变成必然，
-   而不是一个可观察、可归因的现象）。
-2. **共享信道**：发送意图在时刻结束时统一结算，同刻并发且互相在
-   干扰范围内的发送全部判为 COLLISION。
+   确定性抖动与时钟漂移，避免所有节点在同一虚拟时刻齐发（那会让"冲突"
+   变成必然，而不是一个可观察、可归因的现象）。
+2. **共享信道**：信道是按时隙争用的共享资源，同一时隙内互相在干扰范围内
+   的并发发送全部判为 COLLISION；广播是一次发送、多接收端分别判定。
 3. **唯一事实来源**：引擎只写日志，不算指标。指标由 observe/metrics.py
    从日志重算。
 """
@@ -33,7 +33,7 @@ from skyfleet.protocol.version import AcceptDecision
 from skyfleet.sim.agent import NodeAgent
 from skyfleet.sim.leader import LeaderController
 from skyfleet.world.building import grid_buildings
-from skyfleet.world.channel import Channel
+from skyfleet.world.channel import Channel, reception_ok
 from skyfleet.world.link import GeometricOcclusionLinkModel
 from skyfleet.world.mobility import WaypointMover
 from skyfleet.world.node import Node
@@ -46,6 +46,11 @@ EV_LEADER_CHECK = "leader_check"
 EV_RETRY = "retry"
 EV_RX = "rx"
 EV_KILL = "kill"
+EV_CHANNEL = "chan"
+
+#: 广播目的地址。主节点心跳用一条广播覆盖全员，而不是逐节点单播
+#: （后者会把信道负载放大 N 倍，冲突率被严重高估）。
+BROADCAST = "*"
 
 LEASE_TTL = 1_000_000.0
 
@@ -57,6 +62,7 @@ class _Tx:
     attempt: Any
     quality: float
     next_hop: str
+    broadcast: bool = False
 
 
 @dataclass
@@ -75,7 +81,8 @@ class Engine:
         self.channel = Channel(config.channel_rate_bps,
                                config.interference_range_m,
                                self.rngs.get("channel:collision"),
-                               loss_threshold=config.loss_threshold)
+                               loss_threshold=config.loss_threshold,
+                               slot_duration=config.slot_duration)
         self.identity = IdentityRegistry()
         self.board = TaskBoard()
         self.delivery = DeliveryLedger()
@@ -90,13 +97,16 @@ class Engine:
 
         self._built = False
         self._kills: list[tuple[str, float]] = []
-        self._tx_batch: list[_Tx] = []
+        self._tx_index: dict[int, _Tx] = {}
+        self._slot_ticks: set[int] = set()
 
         # 任务执行簿记
         self._node_task_queue: dict[str, list[str]] = {}
         self._active_task: dict[str, str] = {}
         self._task_leg: dict[str, int] = {}
         self._known_tasks: set[str] = set()
+        #: 等待投递确认的节点 -> (msg_id, task_id)
+        self._awaiting_confirm: dict[str, tuple[str, str]] = {}
 
         # 观测簿记
         self._occluded: dict[str, bool] = {}
@@ -123,7 +133,8 @@ class Engine:
 
         self.leader = LeaderController(
             cfg, self.board, self.agents[cfg.leader_id].membership,
-            self.agents[cfg.leader_id], self.identity, None)
+            self.agents[cfg.leader_id], self.identity, None,
+            busy_nodes=frozenset(self.relay_ids))
 
         self._built = True
         return self
@@ -143,19 +154,29 @@ class Engine:
         area = cfg.area
         low, high = cfg.flight_altitude
 
+        # 主节点在高空盘旋：既符合"以高度换覆盖"的直觉，也让遮挡主要由
+        # 从节点的飞行高度决定，而不是由一个静止的低空主节点主导。
         self.nodes[cfg.leader_id] = Node(
-            cfg.leader_id, Role.LEADER, (area / 2, area / 2, (low + high) / 2),
+            cfg.leader_id, Role.LEADER, (area / 2, area / 2, high),
             speed=0.0, energy=cfg.initial_energy)
 
         ids = ([f"S{i + 1}" for i in range(cfg.slaves)]
                + [f"R{i + 1}" for i in range(cfg.relays)])
         for index, node_id in enumerate(ids):
             role = Role.SLAVE if node_id.startswith("S") else Role.RELAY
+            # 中继放在更靠近主节点的内圈，并且一律在高空。
+            # 若把中继和从节点摆在同一个外圈、同一个高度带，两者看到的
+            # 遮挡几乎一样——中继对任何一条链路都不会更好，于是永远
+            # 不会被选中，中继转发这条路径实际上形同虚设。
+            if role is Role.RELAY:
+                radius = area * 0.18
+                z = high
+            else:
+                radius = area * 0.35
+                z = rng.uniform(low, high)
             angle = 2.0 * math.pi * index / len(ids)
-            radius = area * 0.35
             x = area / 2 + radius * math.cos(angle) + rng.uniform(-15.0, 15.0)
             y = area / 2 + radius * math.sin(angle) + rng.uniform(-15.0, 15.0)
-            z = rng.uniform(low, high)
             self.nodes[node_id] = Node(
                 node_id, role,
                 (min(max(x, 0.0), area), min(max(y, 0.0), area), z),
@@ -177,11 +198,13 @@ class Engine:
             self.build()
         self._open_log()
 
-        self.scheduler.on_timestamp_end = self._end_timestamp
         self._subscribe()
         self._start()
 
         self.scheduler.run(until=self.config.duration)
+        # 最后一个时隙没有更晚的时刻来关闭它，收尾时必须强制结算
+        for attempt in self.channel.flush(force=True):
+            self._resolve_tx(attempt)
         assert self.log is not None
         self.log.close()
         return self.config.log_path
@@ -194,11 +217,20 @@ class Engine:
         self.scheduler.subscribe(EV_RETRY, self._on_retry)
         self.scheduler.subscribe(EV_RX, self._on_rx)
         self.scheduler.subscribe(EV_KILL, self._on_kill)
+        self.scheduler.subscribe(EV_CHANNEL, self._on_channel)
 
     def _start(self) -> None:
         cfg = self.config
         assert self.log is not None
         leader_agent = self.agents[cfg.leader_id]
+
+        self.log.write(EventKind.SCENARIO_INIT, 0.0,
+                       area=cfg.area, duration=cfg.duration, seed=cfg.seed,
+                       leader_id=cfg.leader_id,
+                       buildings=[[b.rect[0], b.rect[1], b.rect[2], b.rect[3],
+                                   b.height] for b in self.buildings],
+                       nodes=[[n.node_id, n.role.value, list(n.pos)]
+                              for n in self.nodes.values()])
 
         for node_id, node in self.nodes.items():
             agent = self.agents[node_id]
@@ -246,9 +278,24 @@ class Engine:
             self.scheduler.schedule_at(t, EV_KILL, node_id)
 
     def _jitter(self, node_id: str, stream: str) -> float:
-        """[0,1) 抖动。没有它，所有节点会在同一虚拟时刻齐发，
-        冲突就不再是"竞争现象"而是必然结果。"""
+        """[0,1) 抖动，用于确定各节点周期事件的初始相位。
+
+        没有它，所有节点会在同一虚拟时刻齐发，冲突就不再是"竞争现象"
+        而是必然结果。
+        """
         return self.rngs.get(f"node:{node_id}:{stream}").random()
+
+    def _drift(self, node_id: str, stream: str) -> float:
+        """每次周期事件叠加的时钟漂移（±access_jitter）。"""
+        jitter = self.config.access_jitter
+        if jitter <= 0.0:
+            return 0.0
+        return self.rngs.get(f"node:{node_id}:{stream}:drift").uniform(
+            -jitter, jitter)
+
+    def _next_periodic(self, agent: NodeAgent, stream: str,
+                       period: float, t: float) -> float:
+        return t + period + self._drift(agent.node.node_id, stream)
 
     # ================= 周期性事件 =================
 
@@ -258,15 +305,14 @@ class Engine:
             return
         t = ev.t
         if agent.node.role is Role.LEADER:
-            for member in list(agent.membership.members()):
-                if member != agent.node.node_id:
-                    agent.on_heartbeat_tick(t, dst=member)
+            agent.on_heartbeat_tick(t, dst=BROADCAST)
         else:
             agent.on_heartbeat_tick(t)
         assert self.log is not None
         self.log.write(EventKind.HEARTBEAT_TX, t, node_id=agent.node.node_id)
-        self.scheduler.schedule_at(t + self.config.heartbeat_period,
-                                   EV_HEARTBEAT, agent)
+        self.scheduler.schedule_at(
+            self._next_periodic(agent, "hb", self.config.heartbeat_period, t),
+            EV_HEARTBEAT, agent)
 
     def _on_telemetry(self, ev: Event) -> None:
         agent: NodeAgent = ev.payload
@@ -276,24 +322,36 @@ class Engine:
         agent.on_telemetry_tick(t)
         if agent.node.node_id != self.config.leader_id:
             self._observe_link(agent, t)
-        self.scheduler.schedule_at(t + self.config.telemetry_period,
-                                   EV_TELEMETRY, agent)
+        self.scheduler.schedule_at(
+            self._next_periodic(agent, "tlm", self.config.telemetry_period, t),
+            EV_TELEMETRY, agent)
 
     def _observe_link(self, agent: NodeAgent, t: float) -> None:
-        """评估到主节点与各中继的链路，驱动路由迟滞与遮挡事件。"""
+        """评估到主节点与各中继的链路，驱动路由迟滞与遮挡事件。
+
+        中继自己**不参与**上游选择：否则 R1 选 R2、R2 选 R1 会形成转发
+        环路，消息只能在 TTL 耗尽后消失——那看起来像"丢包"，实际上是
+        路由设计缺陷。
+        """
         assert self.link_model is not None and self.log is not None
         leader_node = self.nodes[self.config.leader_id]
 
         to_leader = self.link_model.evaluate(agent.node, leader_node, t)
         best_id, best_quality = self.config.leader_id, to_leader.quality
 
-        for relay_id in self.relay_ids:
-            relay = self.nodes[relay_id]
-            if relay_id == agent.node.node_id or not self.agents[relay_id].alive:
-                continue
-            quality = self.link_model.evaluate(agent.node, relay, t).quality
-            if quality > best_quality + 0.05:
-                best_id, best_quality = relay_id, quality
+        # 只有直连不足以支撑时才把中继列为候选。详见 SimConfig 中的说明：
+        # 无条件取"最优上游"会让中继承担本可直接送达的流量，信道负载翻倍。
+        if (agent.node.role is not Role.RELAY
+                and to_leader.quality < self.config.relay_direct_threshold):
+            for relay_id in self.relay_ids:
+                relay = self.nodes[relay_id]
+                if (relay_id == agent.node.node_id
+                        or not self.agents[relay_id].alive):
+                    continue
+                quality = self.link_model.evaluate(agent.node, relay,
+                                                   t).quality
+                if quality > best_quality + 0.1:
+                    best_id, best_quality = relay_id, quality
 
         agent.routing.consider(best_id, best_quality, t)
 
@@ -318,7 +376,11 @@ class Engine:
             if not agent.alive or mover is None:
                 continue
             agent.spend_energy(cfg.energy_hover_per_s * dt)
-            if mover.arrived or mover.step(dt):
+            mover.step(dt)
+            # 只有**整条航线走完**才算抵达任务点。航线含巡航转场点，
+            # 若把"到达任意一个航点"当成抵达，无人机会在巡航高度上
+            # 直接开始投递，永远不下降进入峡谷。
+            if mover.arrived:
                 self._advance_mission(node_id, t)
 
         self._sample_countdown += 1
@@ -331,15 +393,29 @@ class Engine:
     def _write_samples(self, t: float) -> None:
         assert self.log is not None
         for node_id, agent in self.agents.items():
+            # 位置与电量一起采样：日志因此可独立重建轨迹，无需另加事件类型
             self.log.write(EventKind.ENERGY_SAMPLE, t, node_id=node_id,
-                           energy=round(agent.node.energy, 6))
+                           energy=round(agent.node.energy, 6),
+                           pos=[round(v, 6) for v in agent.node.pos])
             self.log.write(EventKind.QUEUE_SAMPLE, t, node_id=node_id,
                            **agent.queue.sample())
 
     # ================= 任务执行 =================
 
+    def _route_to(self, point: tuple[float, float, float]
+                  ) -> list[tuple[float, float, float]]:
+        """规划到目标点的航线：先升到巡航高度转场，再下降进入峡谷。
+
+        直线低空穿越整个城区会让链路**长时间**被遮挡，看起来像网络分区；
+        而"高空转场 + 末端下降"让遮挡只发生在投递前后，是短暂、可恢复、
+        可归因的现象——这正是报告要观察的"城市峡谷链路劣化与恢复"。
+        """
+        return [(point[0], point[1], self.config.cruise_altitude), point]
+
     def _advance_mission(self, node_id: str, t: float) -> None:
         assert self.log is not None
+        if node_id in self._awaiting_confirm:
+            return                       # 停在投递点，等确认被 ACK
         task_id = self._active_task.get(node_id)
         if task_id is None:
             self._start_next_task(node_id, t)
@@ -352,15 +428,25 @@ class Engine:
             self._finish_local_task(node_id)
             return
 
-        if self._task_leg.get(node_id, 0) == 0:
+        leg = self._task_leg.get(node_id, 0)
+        if leg == 0:
             self.board.transition(task_id, TaskState.PICKED, t)
             self.log.write(EventKind.TASK_PICKUP, t, task_id=task_id,
                            node_id=node_id)
             self._task_leg[node_id] = 1
-            self.movers[node_id].set_route([task.destination])
+            self.movers[node_id].set_route(self._route_to(task.destination))
+        elif leg == 1:
+            # 已抵达投递点。**先爬升脱离峡谷，再上报**。
+            # 街道峡谷里链路被楼群遮挡，若停在原地等确认，确认发不出去、
+            # ACK 也回不来，任务会卡死直到有效期结束——投递动作本身早已
+            # 完成，却因为上报路径不可用而被判失败。真实的低空配送系统
+            # 同样是"投递后爬升再回传"。
+            self._task_leg[node_id] = 2
+            self.movers[node_id].set_route(
+                [(task.destination[0], task.destination[1],
+                  self.config.cruise_altitude)])
         else:
             self._send_delivery_confirm(node_id, task, t)
-            self._finish_local_task(node_id)
 
     def _start_next_task(self, node_id: str, t: float) -> None:
         queue = self._node_task_queue.get(node_id) or []
@@ -373,7 +459,7 @@ class Engine:
                 continue
             self._active_task[node_id] = task_id
             self._task_leg[node_id] = 0
-            self.movers[node_id].set_route([task.origin])
+            self.movers[node_id].set_route(self._route_to(task.origin))
             return
 
     def _finish_local_task(self, node_id: str) -> None:
@@ -384,6 +470,11 @@ class Engine:
         self.movers[node_id].set_route([])
 
     def _send_delivery_confirm(self, node_id: str, task, t: float) -> None:
+        """发送投递确认，并**停在这里等确认被 ACK**。
+
+        若发完就当作完成，一次确认丢失就会让任务永远停在"已取件"：
+        节点飞走了、任务没交付、主节点也不知道。任务闭环必须止于确认。
+        """
         agent = self.agents[node_id]
         msg = Msg.new("DELIVERY_CONFIRM", src=node_id,
                       dst=self.config.leader_id,
@@ -393,9 +484,29 @@ class Engine:
                       mission_version=self.leader.mission_version,
                       route_version=agent.routing.route_version,
                       operation_id=task.task_id,
+                      deadline=t + self.config.confirm_deadline,
                       payload={"task_id": task.task_id,
                                "delivered_at": t})
+        self._awaiting_confirm[node_id] = (msg.msg_id, task.task_id)
+        self.movers[node_id].set_route([])
         agent.submit(msg, t)
+
+    def _make_ack_handler(self, node_id: str) -> Any:
+        """为**指定节点**生成 ACK 处理器。
+
+        必须按接收节点闭包绑定：ACK 的 msg.src 是主节点，而"谁在等这个
+        ACK"只有接收方自己知道。若用 msg.src 去查等待表，键永远对不上，
+        节点会永远停在投递点等一个早已到达的确认——任务完成率因此被死死
+        钉在"每节点恰好一个"。
+        """
+        def handler(msg: Msg, t: float, quality: float) -> None:
+            awaiting = self._awaiting_confirm.get(node_id)
+            if (awaiting is None
+                    or msg.payload.get("ack_for") != awaiting[0]):
+                return
+            self._awaiting_confirm.pop(node_id, None)
+            self._finish_local_task(node_id)
+        return handler
 
     def _handle_delivery_confirm(self, msg: Msg, t: float,
                                  quality: float) -> None:
@@ -426,7 +537,9 @@ class Engine:
             if record is None or record.status in ("FAILED", "LEFT"):
                 continue
             before = record.status
-            if record.last_seen < t - cfg.heartbeat_period - 1e-9:
+            # 1.5 个周期才判一次丢失：周期发送带时钟漂移，用 1.0 个周期
+            # 会把正常漂移误判为丢包。
+            if record.last_seen < t - 1.5 * cfg.heartbeat_period - 1e-9:
                 agent.membership.on_miss(node_id, t)
                 self.log.write(EventKind.HEARTBEAT_MISS, t, node_id=node_id,
                                miss_count=record.miss_count)
@@ -455,6 +568,7 @@ class Engine:
             if active is not None:
                 affected.add(active)
             self._task_leg.pop(node_id, None)
+            self._awaiting_confirm.pop(node_id, None)
             self._known_tasks -= affected
             self.movers[node_id].set_route([])
 
@@ -498,57 +612,113 @@ class Engine:
 
     def transmit(self, msg: Msg, sender: NodeAgent, t: float) -> None:
         assert self.link_model is not None
-        next_hop = sender.next_hop(msg)
-        target = self.nodes.get(next_hop)
-        if target is None:
-            assert self.log is not None
-            self.log.write(EventKind.MSG_DROP, t, node_id=sender.node.node_id,
-                           msg_id=msg.msg_id, msg_type=msg.msg_type,
-                           reason=DropReason.NO_ROUTE)
-            return
+        broadcast = msg.dst == BROADCAST
+        if broadcast:
+            # 广播是**一次**发送。若按接收端复制成 N 次单播，主节点的
+            # 心跳就会凭空把信道负载放大 N 倍，冲突率随之被严重高估——
+            # 那是模型假象，不是协议性质。接收结果在交付时按接收端分别判定。
+            next_hop, target = BROADCAST, sender.node
+        else:
+            next_hop = sender.next_hop(msg)
+            target = self.nodes.get(next_hop)
+            if target is None:
+                assert self.log is not None
+                self.log.write(EventKind.MSG_DROP, t,
+                               node_id=sender.node.node_id, msg_id=msg.msg_id,
+                               msg_type=msg.msg_type, dst=msg.dst,
+                               reason=DropReason.NO_ROUTE)
+                return
 
-        quality = self.link_model.evaluate(sender.node, target, t).quality
+        quality = (1.0 if broadcast
+                   else self.link_model.evaluate(sender.node, target, t).quality)
         attempt = self.channel.attempt(msg.msg_id, sender.node.node_id,
                                        sender.node.pos, next_hop, target.pos,
                                        t, quality, msg.size_bits)
         sender.spend_energy(self.config.energy_tx_per_bit * msg.size_bits)
-        self._tx_batch.append(_Tx(msg=msg, sender=sender, attempt=attempt,
-                                  quality=quality, next_hop=next_hop))
+        self._tx_index[attempt.tx_id] = _Tx(
+            msg=msg, sender=sender, attempt=attempt, quality=quality,
+            next_hop=next_hop, broadcast=broadcast)
 
-    def _end_timestamp(self, t: float) -> None:
-        """时刻结束：统一结算信道竞争，再决定投递或丢弃。"""
-        self.channel.flush()
-        batch, self._tx_batch = self._tx_batch, []
+        # 时隙关闭时结算竞争。发送可能跨多个时隙，取最后一个即可——
+        # 一次结算会关掉它之前的所有时隙。
+        last_slot = self.channel.slot_containing(attempt.t_end - 1e-12)
+        if last_slot not in self._slot_ticks:
+            self._slot_ticks.add(last_slot)
+            self.scheduler.schedule_at(self.channel.tick_time(last_slot),
+                                       EV_CHANNEL, last_slot)
+
+    def _on_channel(self, ev: Event) -> None:
+        self._slot_ticks.discard(ev.payload)
+        for attempt in self.channel.flush(ev.t):
+            self._resolve_tx(attempt)
+
+    def _resolve_tx(self, attempt: Any) -> None:
+        """时隙结算完毕：投递或按原因丢弃。"""
+        record = self._tx_index.pop(attempt.tx_id, None)
+        if record is None:
+            return
+        msg, sender = record.msg, record.sender
+        node_id = sender.node.node_id
+        t = attempt.t_start
         assert self.log is not None
 
-        for record in batch:
-            msg, sender, attempt = record.msg, record.sender, record.attempt
-            node_id = sender.node.node_id
+        if not attempt.ok:
+            self.log.write(EventKind.MSG_DROP, t, node_id=node_id,
+                           msg_id=msg.msg_id, msg_type=msg.msg_type,
+                           qos=msg.qos.name, hop=msg.hop, dst=msg.dst,
+                           reason=attempt.reason or DropReason.COLLISION)
+            return
 
-            if not attempt.ok:
-                self.log.write(EventKind.MSG_DROP, t, node_id=node_id,
-                               msg_id=msg.msg_id, msg_type=msg.msg_type,
-                               qos=msg.qos.name,
-                               reason=attempt.reason or DropReason.COLLISION)
+        self.log.write(
+            EventKind.MSG_TX, t, node_id=node_id, msg_id=msg.msg_id,
+            msg_type=msg.msg_type, dst=msg.dst,
+            next_hop=record.next_hop, qos=msg.qos.name,
+            rel=msg.reliability.name, bits=msg.size_bits,
+            hop=msg.hop, route_version=msg.route_version,
+            mission_version=msg.mission_version,
+            is_retry=bool(sender.reliability.exhausted(msg.msg_id)),
+            t_access=round(attempt.t_access, 9),
+            t_tx=round(attempt.t_tx, 9))
+
+        if record.broadcast:
+            self._deliver_broadcast(record, t)
+            return
+
+        receiver = self.agents.get(record.next_hop)
+        if receiver is None:
+            return
+        self.scheduler.schedule_at(
+            attempt.t_end + attempt.t_prop, EV_RX,
+            _Rx(msg=msg, receiver=receiver, quality=record.quality,
+                attempt=attempt))
+
+    def _deliver_broadcast(self, record: _Tx, t: float) -> None:
+        """广播交付：对每个接收端单独判定链路质量。
+
+        接收端按 node_id 排序处理，随机流也按消息派生，因此判定顺序与
+        结果都是确定的。
+        """
+        assert self.link_model is not None and self.log is not None
+        msg, sender, attempt = record.msg, record.sender, record.attempt
+        rng = self.rngs.get(f"rx:{msg.msg_id}")
+        for node_id in sorted(self.agents):
+            if node_id == sender.node.node_id:
                 continue
-
-            self.log.write(
-                EventKind.MSG_TX, t, node_id=node_id, msg_id=msg.msg_id,
-                msg_type=msg.msg_type, dst=msg.dst,
-                next_hop=record.next_hop, qos=msg.qos.name,
-                rel=msg.reliability.name, bits=msg.size_bits,
-                hop=msg.hop, route_version=msg.route_version,
-                mission_version=msg.mission_version,
-                is_retry=bool(sender.reliability.exhausted(msg.msg_id)),
-                t_access=round(attempt.t_access, 9),
-                t_tx=round(attempt.t_tx, 9))
-
-            receiver = self.agents.get(record.next_hop)
-            if receiver is None:
+            receiver = self.agents[node_id]
+            if not receiver.alive:
+                continue
+            quality = self.link_model.evaluate(
+                sender.node, receiver.node, attempt.t_start).quality
+            if not reception_ok(quality, self.config.loss_threshold, rng):
+                self.log.write(EventKind.MSG_DROP, attempt.t_start,
+                               node_id=node_id, msg_id=msg.msg_id,
+                               msg_type=msg.msg_type, src=msg.src,
+                               dst=msg.dst, reason=DropReason.OCCLUDED,
+                               stage="rx")
                 continue
             self.scheduler.schedule_at(
                 attempt.t_end + attempt.t_prop, EV_RX,
-                _Rx(msg=msg, receiver=receiver, quality=record.quality,
+                _Rx(msg=msg, receiver=receiver, quality=quality,
                     attempt=attempt))
 
     def _on_rx(self, ev: Event) -> None:
@@ -559,8 +729,13 @@ class Engine:
         if not receiver.alive:
             return
 
+        # 广播是链路本地的：所有邻居都是接收者，收到即本地处理，绝不转发。
+        # 若把广播当成"目的不是本机"，每个收到它的节点都会转发一次，
+        # 转发量会凭空等于节点数乘以广播速率。
+        broadcast = msg.dst == BROADCAST
+
         # 中继转发：目的不是本机，只做转发，不触发本机协议动作
-        if msg.dst != receiver.node.node_id:
+        if not broadcast and msg.dst != receiver.node.node_id:
             self._forward(msg, receiver, t)
             return
 
@@ -575,25 +750,49 @@ class Engine:
 
         created = msg.t_created
         attempt = payload.attempt
+        # 采样等待与排队只有**本机产生**的消息才有意义：广播接收方与
+        # 转发副本的接收方从未在本机排队，此时两段记为 0，
+        # 而不是拿 0.0 去减生成时刻、算出荒谬的负时延。
         t_enqueue = receiver.enqueue_time(msg.msg_id)
         t_dequeue = receiver.dequeue_time(msg.msg_id)
+        sample_wait = (t_enqueue - created) if t_enqueue is not None else 0.0
+        queue_wait = ((t_dequeue - t_enqueue)
+                      if (t_dequeue is not None and t_enqueue is not None)
+                      else 0.0)
         self.log.write(
             EventKind.MSG_RX, t, node_id=receiver.node.node_id,
             msg_id=msg.msg_id, msg_type=msg.msg_type, src=msg.src,
             qos=msg.qos.name, hop=msg.hop,
             e2e=round(t - created, 9),
-            t_sample_wait=round(t_enqueue - created, 9),
-            t_queue=round(t_dequeue - t_enqueue, 9),
+            t_sample_wait=round(sample_wait, 9),
+            t_queue=round(queue_wait, 9),
             t_access=round(attempt.t_access, 9),
             t_tx=round(attempt.t_tx, 9),
             t_prop=round(attempt.t_prop, 9))
 
     def _forward(self, msg: Msg, relay: NodeAgent, t: float) -> None:
         assert self.log is not None
+        # 只有中继角色承担转发。从节点或主节点收到"不是给自己的"消息，
+        # 只能说明它不该在本次发送的接收集合里——静默丢弃，不得转发，
+        # 否则共享介质上的旁听会变成一场转发风暴。
+        if relay.node.role is not Role.RELAY:
+            self.log.write(EventKind.MSG_DROP, t, node_id=relay.node.node_id,
+                           msg_id=msg.msg_id, msg_type=msg.msg_type,
+                           dst=msg.dst, reason=DropReason.NO_ROUTE,
+                           hop=msg.hop)
+            return
         if msg.ttl <= 1:
             self.log.write(EventKind.MSG_DROP, t, node_id=relay.node.node_id,
                            msg_id=msg.msg_id, msg_type=msg.msg_type,
-                           reason=DropReason.TTL_EXPIRED)
+                           dst=msg.dst, reason=DropReason.TTL_EXPIRED,
+                           hop=msg.hop)
+            return
+        # 兜底：绝不把消息原路送回它的来源（环路防护）
+        if relay.next_hop(msg) == msg.src:
+            self.log.write(EventKind.MSG_DROP, t, node_id=relay.node.node_id,
+                           msg_id=msg.msg_id, msg_type=msg.msg_type,
+                           dst=msg.dst, reason=DropReason.NO_ROUTE,
+                           hop=msg.hop)
             return
         forwarded = replace(msg, hop=msg.hop + 1, ttl=msg.ttl - 1)
         if relay.forward(forwarded, t):
@@ -620,8 +819,24 @@ class Engine:
                                msg_type=msg.msg_type,
                                reason=DropReason.DEADLINE_MISSED)
                 agent.reliability.forget(msg.msg_id)
+                self._on_expired(agent, msg, t)
         self.scheduler.schedule_at(t + self.config.retry_interval, EV_RETRY,
                                    agent)
+
+    def _on_expired(self, agent: NodeAgent, msg: Msg, t: float) -> None:
+        """确认彻底失败：任务作废并交回主节点重派，而不是静默卡住。"""
+        node_id = agent.node.node_id
+        awaiting = self._awaiting_confirm.get(node_id)
+        if awaiting is None or awaiting[0] != msg.msg_id:
+            return
+        _, task_id = awaiting
+        self._awaiting_confirm.pop(node_id, None)
+        self._finish_local_task(node_id)
+        if self.leader.mark_failed(task_id, t):
+            assert self.log is not None
+            self.log.write(EventKind.TASK_FAIL, t, task_id=task_id,
+                           node_id=node_id, reason=DropReason.DEADLINE_MISSED,
+                           mission_version=self.leader.mission_version)
 
     def _on_kill(self, ev: Event) -> None:
         node_id = ev.payload
@@ -638,3 +853,7 @@ class Engine:
     def wire_leader_handlers(self) -> None:
         self.agents[self.config.leader_id].handlers[
             "DELIVERY_CONFIRM"] = self._handle_delivery_confirm
+        for node_id in self.agents:
+            if node_id != self.config.leader_id:
+                self.agents[node_id].handlers["ACK"] = \
+                    self._make_ack_handler(node_id)

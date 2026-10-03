@@ -21,13 +21,18 @@ Pos = tuple[float, float, float]
 class LeaderController:
     def __init__(self, config: SimConfig, board: TaskBoard,
                  members: MembershipView, agent: NodeAgent,
-                 identity: IdentityRegistry, log: Any) -> None:
+                 identity: IdentityRegistry, log: Any,
+                 busy_nodes: frozenset[str] = frozenset()) -> None:
         self.config = config
         self.board = board
         self.members = members
         self.agent = agent
         self.identity = identity
         self.log = log
+        #: 不承担配送任务的节点（中继）。中继是**通信基础设施**：一旦
+        #: 让它去送货，它就会离开站位、飞进楼群低空，既不再提供中继覆盖，
+        #: 又把自己变成最容易被遮挡的节点——中继的价值恰好被抹掉。
+        self.busy_nodes = busy_nodes
         self.mission_version = 0
         #: task_id -> node_id
         self.assignments: dict[str, str] = {}
@@ -48,20 +53,27 @@ class LeaderController:
         return self.config.tasks
 
     def _point(self, index: int, salt: int) -> Pos:
-        """由索引确定性推导一个点（不使用随机流，保证场景可复现）。"""
+        """由索引确定性推导一个点（不使用随机流，保证场景可复现）。
+
+        高度取自**投递高度带**：取餐点与投递点都在街道峡谷内，
+        因此"下降投递"这一航段必然穿过楼群。
+        """
         area = self.config.area
         x = ((index * 73 + salt * 29) % 97) / 97.0 * area
         y = ((index * 41 + salt * 17) % 89) / 89.0 * area
-        low, high = self.config.flight_altitude
+        low, high = self.config.delivery_altitude
         z = low + ((index * 13 + salt) % 7) / 7.0 * (high - low)
         return (x, y, z)
 
     # ---------- 分配 ----------
 
     def fresh_members(self) -> list[str]:
-        """有能力承担任务的成员（区别于"仅仅在线"）。"""
+        """有能力承担任务的成员（区别于"仅仅在线"）。
+
+        中继被排除在外：它承担的是转发，不是配送。详见 busy_nodes 的说明。
+        """
         return [n for n in self.members.available(self.config.min_energy_for_task)
-                if n != self.config.leader_id]
+                if n != self.config.leader_id and n not in self.busy_nodes]
 
     def assign_pending(self, t: float) -> int:
         """把 CREATED / REASSIGNED 的任务轮流分配给可用成员。"""
@@ -136,4 +148,19 @@ class LeaderController:
         if not self.board.transition(task_id, TaskState.DELIVERED, t):
             return False
         self.assignments.pop(task_id, None)
+        return True
+
+    def mark_failed(self, task_id: str, t: float) -> bool:
+        """任务执行失败（例如投递确认始终无法送达）——作废并等待重派。"""
+        task = self.board.get(task_id)
+        if task is None or task.state in (TaskState.DELIVERED,
+                                          TaskState.EXPIRED):
+            return False
+        if not self.board.transition(task_id, TaskState.FAILED, t):
+            return False
+        if not self.board.transition(task_id, TaskState.REASSIGNED, t):
+            return False
+        task.assignee = None
+        self.assignments.pop(task_id, None)
+        self.mission_version += 1
         return True

@@ -28,6 +28,9 @@ class DropReason(str, enum.Enum):
 class EventKind(str, enum.Enum):
     """写入事件日志的事件类型。"""
 
+    #: 世界描述（t=0）。有了它，一份日志就能**单独**重建全部画面，
+    #: 不需要额外携带场景配置文件。
+    SCENARIO_INIT = "SCENARIO_INIT"
     NODE_JOIN = "NODE_JOIN"
     NODE_LEAVE = "NODE_LEAVE"
     NODE_REJOIN = "NODE_REJOIN"

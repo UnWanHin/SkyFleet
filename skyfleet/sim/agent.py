@@ -86,11 +86,17 @@ class NodeAgent:
 
     # ---------- 供引擎查询的计时信息（六段时延的第一、二段） ----------
 
-    def enqueue_time(self, msg_id: str) -> float:
-        return self._enqueue_t.get(msg_id, 0.0)
+    def enqueue_time(self, msg_id: str) -> float | None:
+        """本节点为该消息入队的时刻；从未入队则返回 None。
 
-    def dequeue_time(self, msg_id: str) -> float:
-        return self._dequeue_t.get(msg_id, 0.0)
+        必须是 None 而不是 0.0：接收广播或转发副本的节点从未在本机排队，
+        若用 0.0 兜底，"采样等待 = 入队时刻 - 生成时刻"会被算成
+        "0 - 生成时刻"，六段时延分解里就会出现几十万毫秒的负值。
+        """
+        return self._enqueue_t.get(msg_id)
+
+    def dequeue_time(self, msg_id: str) -> float | None:
+        return self._dequeue_t.get(msg_id)
 
     def next_seq(self) -> int:
         self._seq += 1
@@ -153,7 +159,7 @@ class NodeAgent:
         if not self.rate_limiter.allow(msg, t):
             self.log.write(EventKind.MSG_DROP, t, node_id=self.node.node_id,
                            msg_id=msg.msg_id, msg_type=msg.msg_type,
-                           qos=msg.qos.name,
+                           qos=msg.qos.name, dst=msg.dst,
                            reason=DropReason.RATE_LIMITED)
             return False
 
@@ -162,7 +168,7 @@ class NodeAgent:
         if reason is not None:
             self.log.write(EventKind.MSG_DROP, t, node_id=self.node.node_id,
                            msg_id=msg.msg_id, msg_type=msg.msg_type,
-                           qos=msg.qos.name, reason=reason)
+                           qos=msg.qos.name, reason=reason, dst=msg.dst)
             return False
 
         if self._needs_ack(msg):
@@ -213,6 +219,10 @@ class NodeAgent:
 
     def receive(self, msg: Msg, t: float, quality: float = 1.0) -> AcceptDecision:
         if self.seen_msg_ids.seen(msg.msg_id, t):
+            # 重传副本仍要确认：去重抑制的是**动作**，不是**确认**。
+            # 若此处不回 ACK，源端会一直重传到有效期结束，而接收端其实
+            # 早就处理过了。
+            self._ack_if_needed(msg, t)
             self.log.write(EventKind.MSG_DUP, t, node_id=self.node.node_id,
                            msg_id=msg.msg_id, msg_type=msg.msg_type,
                            src=msg.src, reason=DropReason.DEDUP)
@@ -221,11 +231,14 @@ class NodeAgent:
         decision = accept(msg, self.view, self.dedup, t)
 
         if decision is not AcceptDecision.ACCEPT:
+            if decision in (AcceptDecision.DEDUP, AcceptDecision.STALE_SEQ):
+                self._ack_if_needed(msg, t)
             self.log.write(
                 EventKind.MSG_DUP if decision is AcceptDecision.DEDUP
                 else EventKind.MSG_DROP,
                 t, node_id=self.node.node_id, msg_id=msg.msg_id,
-                msg_type=msg.msg_type, src=msg.src, reason=decision.value)
+                msg_type=msg.msg_type, src=msg.src, dst=msg.dst,
+                reason=decision.value)
             return decision
 
         if msg.msg_type == "HEARTBEAT":
@@ -242,11 +255,15 @@ class NodeAgent:
             self.reliability.ack(msg.payload.get("ack_for", ""))
         elif msg.reliability >= Rel.R2:
             self._send_ack(msg, t)
-
         handler = self.handlers.get(msg.msg_type)
         if handler is not None:
             handler(msg, t, quality)
         return decision
+
+    def _ack_if_needed(self, msg: Msg, t: float) -> None:
+        """对已处理过的 R2/R3 消息补发确认。"""
+        if msg.msg_type != "ACK" and msg.reliability >= Rel.R2:
+            self._send_ack(msg, t)
 
     def _send_ack(self, original: Msg, t: float) -> None:
         ack = Msg.new("ACK", src=self.node.node_id, dst=original.src, t=t,
