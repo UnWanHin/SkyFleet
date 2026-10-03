@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -52,13 +53,19 @@ def _use_cjk_font() -> bool:
 
 
 def _configure_svg_text() -> None:
-    """让 SVG 保留**可搜索、可编辑的文字**而不是字形轮廓路径。
+    """让 SVG 保留**可搜索、可编辑的文字**而不是字形轮廓路径，
+    并让导出的 SVG 位元级可重现。
 
     matplotlib 默认把文字转成路径，好处是任何机器上显示都一致，坏处是
     导出的 SVG 里一个字都搜不到，也无法在 Illustrator/Inkscape 里改轴标签。
-    作为报告插图，可编辑比"永不缺字体"更重要——字体已经随图内嵌备选。
+    作为报告插图，可编辑比"永不缺字体"更重要。
+
+    `svg.hashsalt` 也必须固定：不固定时 matplotlib 用对象的**内存地址**
+    生成元素 id（`id="m086001c3a6"`），于是同一份数据每次画出来的 SVG
+    都不同——图能重现但文件不能，diff 里全是噪声。
     """
     plt.rcParams["svg.fonttype"] = "none"
+    plt.rcParams["svg.hashsalt"] = "skyfleet"
 
 
 CJK = _use_cjk_font()
@@ -76,9 +83,26 @@ def _save(fig, out_dir: Path, name: str) -> list[str]:
     for suffix, kwargs in ((".png", {"dpi": 220}), (".svg", {})):
         path = out_dir / f"{name}{suffix}"
         fig.savefig(path, bbox_inches="tight", **kwargs)
+        if suffix == ".svg":
+            _normalise_svg_metadata(path)
         written.append(str(path))
     plt.close(fig)
     return written
+
+
+def _normalise_svg_metadata(path: Path) -> None:
+    """把 SVG 元数据里的导出时刻固定下来。
+
+    matplotlib 会把"导出时刻"写进 `<dc:date>`。它是唯一让同一份数据
+    两次导出产生不同文件的东西：固定 `svg.hashsalt` 之后，元素 id 已经
+    稳定，只剩下这一行时间戳。仿真本身是确定性的，图也不该例外——
+    需要时间信息时看日志里的仿真时刻，而不是看文件是几点画出来的。
+    """
+    text = path.read_text(encoding="utf-8")
+    normalised = re.sub(r"<dc:date>[^<]*</dc:date>",
+                        "<dc:date>1970-01-01T00:00:00</dc:date>", text)
+    if normalised != text:
+        path.write_text(normalised, encoding="utf-8")
 
 
 # ---------------------------------------------------------------- 图表
