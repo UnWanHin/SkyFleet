@@ -34,7 +34,14 @@ from skyfleet.sim.agent import NodeAgent
 from skyfleet.sim.leader import LeaderController
 from skyfleet.world.building import grid_buildings
 from skyfleet.world.channel import Channel, reception_ok
-from skyfleet.world.link import GeometricOcclusionLinkModel
+from skyfleet.sim.adversary import (
+    EV_ATTACK, AdversaryInjector, AttackKind, build_attack_msg,
+)
+from skyfleet.world.geofence import breach as geofence_breach
+from skyfleet.world.geofence import build_geofences
+from skyfleet.world.impairment import wrap_with_impairments
+from skyfleet.world.link import LinkModel, build_link_model
+from skyfleet.world.position import build_position_source
 from skyfleet.world.mobility import WaypointMover
 from skyfleet.world.node import Node
 
@@ -67,6 +74,23 @@ class _Tx:
 
 
 @dataclass
+class _InjectedAttempt:
+    """对抗注入消息的"伪发送记录"。
+
+    注入消息没有真实占用信道，因此时延各段为 0；但接口必须与真实
+    发送记录一致，否则接收路径要为此加分支，注入就绕开了正常路径。
+    """
+
+    t_access: float = 0.0
+    t_tx: float = 0.0
+    t_prop: float = 0.0
+    t_start: float = 0.0
+    t_end: float = 0.0
+    ok: bool = True
+    reason: str | None = None
+
+
+@dataclass
 class _Rx:
     msg: Msg
     receiver: NodeAgent
@@ -79,6 +103,11 @@ class Engine:
         self.config = config
         self.scheduler = Scheduler()
         self.rngs = RngRegistry(config.seed)
+        # 环境随机源与协议随机源分开：env_seed 控制楼群与初始站位，
+        # seed 控制协议侧行为。标定实验靠这条隔离拿到共同随机数。
+        env_seed = (config.seed if config.env_seed is None
+                    else config.env_seed)
+        self.env_rngs = RngRegistry(env_seed)
         self.channel = Channel(config.channel_rate_bps,
                                config.interference_range_m,
                                self.rngs.get("channel:collision"),
@@ -89,7 +118,7 @@ class Engine:
         self.delivery = DeliveryLedger()
 
         self.buildings: list[Any] = []
-        self.link_model: GeometricOcclusionLinkModel | None = None
+        self.link_model: LinkModel | None = None
         self.nodes: dict[str, Node] = {}
         self.agents: dict[str, NodeAgent] = {}
         self.movers: dict[str, WaypointMover] = {}
@@ -112,7 +141,8 @@ class Engine:
 
         # 观测簿记
         self._occluded: dict[str, bool] = {}
-        self._last_safety: dict[str, SafetyAction] = {}
+        #: node_id -> (动作, 原因)；原因参与变化检测，见 _check_safety
+        self._last_safety: dict[str, tuple[SafetyAction, str]] = {}
         self._sample_countdown = 0
 
     # ================= 构建 =================
@@ -122,14 +152,20 @@ class Engine:
 
         self.buildings = grid_buildings(cfg.area, cfg.blocks, cfg.gap,
                                         cfg.height_range,
-                                        self.rngs.get("env:buildings"))
-        self.link_model = GeometricOcclusionLinkModel(
-            self.buildings, max_range=cfg.max_link_range)
+                                        self.env_rngs.get("env:buildings"))
+        # P1：在链路模型之上按配置叠加损伤源。没有任何损伤源时
+        # wrap_with_impairments 原样返回，不引入额外对象。
+        self.link_model = wrap_with_impairments(
+            build_link_model(cfg, self.buildings), cfg)
+        self.position_source = build_position_source(cfg)
+        self.geofences = build_geofences(cfg)
+        self.adversary = AdversaryInjector.from_config(cfg)
 
         self._place_nodes()
 
         for node in self.nodes.values():
             agent = NodeAgent(node, cfg, self.identity, self.rngs, None, self)
+            agent.position = self.position_source
             self.agents[node.node_id] = agent
             self.movers[node.node_id] = WaypointMover(node, node.speed)
 
@@ -152,7 +188,7 @@ class Engine:
 
     def _place_nodes(self) -> None:
         cfg = self.config
-        rng = self.rngs.get("env:placement")
+        rng = self.env_rngs.get("env:placement")
         area = cfg.area
         low, high = cfg.flight_altitude
 
@@ -228,6 +264,7 @@ class Engine:
         self.scheduler.subscribe(EV_RX, self._on_rx)
         self.scheduler.subscribe(EV_KILL, self._on_kill)
         self.scheduler.subscribe(EV_REVIVE, self._on_revive)
+        self.scheduler.subscribe(EV_ATTACK, self._on_attack)
         self.scheduler.subscribe(EV_CHANNEL, self._on_channel)
 
     def _start(self) -> None:
@@ -292,6 +329,7 @@ class Engine:
             self.scheduler.schedule_at(t, EV_KILL, node_id)
         for node_id, t in self._revives:
             self.scheduler.schedule_at(t, EV_REVIVE, node_id)
+        self.adversary.schedule(self.scheduler)
 
     def _jitter(self, node_id: str, stream: str) -> float:
         """[0,1) 抖动，用于确定各节点周期事件的初始相位。
@@ -604,15 +642,28 @@ class Engine:
             if node_id == cfg.leader_id or not agent.alive:
                 continue
             leader_seen = agent.last_heard.get(cfg.leader_id)
+            status = agent.position.report(agent.node, t)
+            fence = geofence_breach(agent.node.pos, self.geofences)
+            link_lost = (leader_seen is None
+                         or t - leader_seen > 2.0 * cfg.heartbeat_period)
+            low_battery = agent.energy_is_low()
+            stale = status.stale
+            # 原因也要参与变化检测：只比较动作时，"已经在悬停、随后 GNSS
+            # 才失锁"这种情况不会有任何日志——恰好是最需要看见的那一类。
+            cause = ("GEOFENCE" if fence is not None else
+                     "LOW_BATTERY" if low_battery else
+                     "POSITION_STALE" if stale else
+                     "LINK_LOST" if link_lost else "NONE")
             action = safety_decision(
-                leader_lost=(leader_seen is None
-                             or t - leader_seen > 2.0 * cfg.heartbeat_period),
-                low_battery=agent.energy_is_low(),
+                leader_lost=link_lost, low_battery=low_battery,
+                position_stale=stale, geofence=fence is not None,
             )
-            if self._last_safety.get(node_id) != action:
-                self._last_safety[node_id] = action
+            if self._last_safety.get(node_id) != (action, cause):
+                self._last_safety[node_id] = (action, cause)
                 self.log.write(EventKind.SAFETY_ACTION, t, node_id=node_id,
-                               action=action.value)
+                               action=action.value, cause=cause,
+                               geofence=fence,
+                               position_age=round(status.age_s, 6))
 
     def _log_status(self, node_id: str, before: Any, after: Any,
                     t: float) -> None:
@@ -887,6 +938,55 @@ class Engine:
         self.scheduler.schedule_at(
             ev.t + self._jitter(node_id, "hb") * self.config.heartbeat_period,
             EV_HEARTBEAT, agent)
+
+    def _on_attack(self, ev: Event) -> None:
+        """把对抗注入投进**正常接收路径**。
+
+        不在这里判断"要不要拒绝"——那验的是补丁，不是协议。消息照常
+        进入 NodeAgent.receive，由会话/任期/版本/去重/有效期检查决定去留，
+        被拒时产生的 MSG_DROP 就是"校验在工作"的证据。
+        """
+        index, attack = ev.payload
+        leader = self.agents.get(self.config.leader_id)
+        if leader is None:
+            return
+        # 会话必须取自**被冒充的发送方**（消息的 src），而不是被攻击的一侧：
+        # 发给 S1 的过期指令其 src 是主节点，会话就该是主节点的。
+        # 用错了会话，消息会先被会话校验挡成 STALE_SESSION，
+        # 过期校验根本没走到——"防护有效"与"检查没跑"看起来一模一样。
+        impersonated = self.agents.get(attack.target or attack.node_id)
+        if attack.kind is AttackKind.EXPIRED:
+            impersonated = leader
+        session_id = (impersonated.session_id if impersonated is not None
+                      and impersonated.session_id else leader.session_id)
+        msg = build_attack_msg(
+            attack,
+            leader_id=self.config.leader_id,
+            session_id=session_id,
+            leader_epoch=leader.leader_epoch,
+            seq=10 ** 6 + index,
+            t_created=ev.t,
+            deadline=(ev.t + 1.0 if attack.kind is not AttackKind.EXPIRED
+                      else ev.t - 1.0),
+        )
+        # 投递目标是**消息自己声明的地**，不是固定送给主节点：
+        # 把发给 S1 的过期指令投到主节点，只会因"目的地不是我"被转发逻辑
+        # 挡成 NO_ROUTE——看起来像防护成功，实际那条校验根本没被走到。
+        receiver = self.agents.get(msg.dst) or leader
+        if not receiver.alive:
+            return
+
+        self.adversary.injected.append(msg.msg_id)
+        assert self.log is not None
+        self.log.write(EventKind.ATTACK_INJECT, ev.t,
+                       node_id=receiver.node.node_id,
+                       msg_id=msg.msg_id, msg_type=msg.msg_type,
+                       src=msg.src, dst=msg.dst,
+                       attack_kind=attack.kind.value)
+        self._on_rx(Event(t=ev.t, kind=EV_RX,
+                          payload=_Rx(msg=msg, receiver=receiver,
+                                      quality=1.0,
+                                      attempt=_InjectedAttempt())))
 
     # ================= 供主节点处理器接线 =================
 

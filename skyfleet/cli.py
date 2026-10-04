@@ -16,6 +16,9 @@ from pathlib import Path
 
 from skyfleet.kernel.config import SimConfig, apply_overrides, baseline_path
 
+#: 允许被"翻译成人话"的可选依赖。仿真核心零依赖，只有可视化需要它们。
+OPTIONAL_DEPENDENCIES = frozenset({"matplotlib"})
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -44,6 +47,16 @@ def build_parser() -> argparse.ArgumentParser:
     everything.add_argument("--seed", type=int, default=None)
     everything.add_argument("--duration", type=float, default=None)
     everything.add_argument("--out", default="out")
+
+    study = sub.add_parser("study", help="P1 参数标定：按规格扫参并汇总")
+    study.add_argument("--spec", required=True, help="扫参规格 JSON")
+    study.add_argument("--out", default=None,
+                       help="输出目录，默认 out/study/<规格名>")
+    study.add_argument("--jobs", type=int, default=1,
+                       help="并发进程数；结果与并发度无关")
+    study.add_argument("--no-logs", action="store_true",
+                       help="不保留每轮的原始日志（只留汇总）")
+    study.add_argument("--quiet", action="store_true")
 
     return parser
 
@@ -128,12 +141,36 @@ def _cmd_all(args) -> int:
     return 0
 
 
+def _cmd_study(args) -> int:
+    from skyfleet.study.runner import run_sweep
+    from skyfleet.study.spec import SweepSpec
+
+    spec = SweepSpec.from_json(args.spec)
+    out = Path(args.out) if args.out else Path("out") / "study" / spec.name
+
+    print(f"扫参：{spec.name}（{spec.run_count()} 次运行，"
+          f"{spec.repeats} 次重复/组合，{args.jobs} 进程）")
+    result = run_sweep(spec, out, jobs=args.jobs,
+                       keep_logs=not args.no_logs, verbose=not args.quiet)
+
+    # 规格先存档：表格必须能对应到一份确切的规格，否则数字只是截图
+    spec_path = result.write_spec(out / "spec.json")
+    csv_path = result.write_csv(out / "runs.csv")
+    md_path = result.write_markdown(out / "summary.md")
+
+    print(f"规格：{spec_path}")
+    print(f"逐次结果：{csv_path}")
+    print(f"汇总：{md_path}")
+    return 0
+
+
 COMMANDS = {
     "run": _cmd_run,
     "metrics": _cmd_metrics,
     "plot": _cmd_plot,
     "replay": _cmd_replay,
     "all": _cmd_all,
+    "study": _cmd_study,
 }
 
 
@@ -157,9 +194,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
     except ImportError as exc:
-        # 仿真核心零依赖，只有画图需要 matplotlib。缺依赖时给出可照做的
-        # 命令，而不是把 import 的堆栈丢给使用者。
-        print(f"错误：缺少可选依赖 {exc.name or exc}。\n"
+        # 只把**可选依赖**缺失翻译成人话。曾经这里无条件捕获 ImportError，
+        # 结果代码里真正的 import 错误被报成"缺少 skyfleet.world.geometry"，
+        # 排查方向被彻底带偏。真实错误必须原样抛出。
+        root = (exc.name or "").split(".")[0]
+        if root not in OPTIONAL_DEPENDENCIES:
+            raise
+        print(f"错误：缺少可选依赖 {exc.name}。\n"
               f"      画图与回放需要 matplotlib："
               f"python3 -m pip install matplotlib", file=sys.stderr)
         return 1

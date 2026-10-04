@@ -49,6 +49,16 @@ class SimConfig:
     initial_energy: float = 100.0
     min_energy_for_task: float = 20.0
 
+    #: 链路模型："geometric"（P0 几何遮挡，二值）或 "nlos"
+    #: （P1 绕射 + 快衰落）。协议层不感知差异——这正是 §9 的保险栓。
+    link_model: str = "geometric"
+
+    #: 环境随机种子。为 None 时退回 seed（保持既有场景行为不变）。
+    #: 显式指定后，**楼群布局与初始站位只由它决定**，与 seed 无关；
+    #: 于是扫参的重复实验可以在同一座城市里比较协议差异（共同随机数）。
+    #: 不这样做的话，"参数效应"里会混进"城市布局效应"，而后者大得多。
+    env_seed: int | None = None
+
     #: 故障注入：[[node_id, 静默起始时刻], ...]。
     #: 报告 R0-R3 要求"失效检测 -> 判定 -> 重派 -> 恢复"这条链可复现，
     #: 因此把它做成**场景文件的一部分**，而不是只存在于测试代码里——
@@ -56,6 +66,26 @@ class SimConfig:
     kills: tuple[tuple[str, float], ...] = ()
     #: 故障恢复：[[node_id, 重新入网时刻], ...]
     revives: tuple[tuple[str, float], ...] = ()
+
+    # ===== 场景自述（不参与仿真，只为报告与命令行阅读）=====
+    #: 场景名。留空时由文件名推断。
+    name: str = ""
+    #: 场景说明：这是什么场景、想验证什么。
+    description: str = ""
+
+    # ===== P1 注入接口（§9）=====
+    #: 背景干扰源：[{"id","x","y","radius","t_start","t_end","extra_loss_db"}]
+    interferences: tuple[dict, ...] = ()
+    #: 临时障碍（高架/塔吊）：[{"id","x","y","w","h","height","t_start","t_end"}]
+    obstacles: tuple[dict, ...] = ()
+    #: 禁飞区：[{"id","x","y","w","h","z_min","z_max"}]
+    geofences: tuple[dict, ...] = ()
+    #: GNSS 定位漂移幅度（米）。0 表示理想定位。
+    gnss_drift_m: float = 0.0
+    #: GNSS 失锁时段：[[node_id, 起始, 结束], ...]
+    gnss_outages: tuple[tuple[str, float, float], ...] = ()
+    #: 对抗注入：[{"kind": ..., "t": ...}, ...]，见 sim/adversary.py
+    adversary: tuple[dict, ...] = ()
 
     # 协议节奏
     heartbeat_period: float = 1.0
@@ -125,6 +155,12 @@ _TUPLE_FIELDS = ("height_range", "flight_altitude", "delivery_altitude")
 #: 这些字段是"列表的列表"，需要把内层也转成元组
 _PAIR_LIST_FIELDS = ("kills", "revives")
 
+#: 三元组列表（节点, 起始, 结束）
+_TRIPLE_LIST_FIELDS = ("gnss_outages",)
+
+#: 字典列表，原样保留但转成元组
+_DICT_LIST_FIELDS = ("interferences", "obstacles", "geofences", "adversary")
+
 
 def load_config(path: str | Path) -> SimConfig:
     """加载场景配置。未知字段报错，缺失字段用默认值。"""
@@ -140,19 +176,42 @@ def load_config(path: str | Path) -> SimConfig:
     if not isinstance(raw, dict):
         raise ValueError(f"配置文件顶层必须是对象: {path}")
 
+    try:
+        raw = coerce_overrides(raw)
+    except ValueError as exc:
+        raise ValueError(f"配置文件含无效字段: {path}: {exc}") from exc
+
+    return SimConfig(**raw)
+
+
+def coerce_overrides(raw: dict) -> dict:
+    """把外部传入的参数值规范化成 SimConfig 能接受的类型。
+
+    配置文件和扫参规格走的是**同一条**规范化路径：如果扫参自己再实现一遍，
+    两边对 tuple 的处理迟早会漂开，届时扫出来的结果和手跑的结果不一致，
+    而这类不一致极难察觉。未知键一律报错——扫参时把 `slot_duration`
+    拼成 `slot_duraton`，静默忽略会让整轮扫描的结论都是假的。
+    """
     known = {f.name for f in fields(SimConfig)}
     unknown = sorted(set(raw) - known)
     if unknown:
-        raise ValueError(f"配置文件含未知字段 {unknown}: {path}")
+        raise ValueError(f"未知字段 {unknown}")
 
+    out = dict(raw)
     for key in _TUPLE_FIELDS:
-        if key in raw:
-            raw[key] = tuple(raw[key])
+        if out.get(key) is not None:
+            out[key] = tuple(float(v) for v in out[key])
     for key in _PAIR_LIST_FIELDS:
-        if key in raw:
-            raw[key] = tuple((str(n), float(t)) for n, t in raw[key])
-
-    return SimConfig(**raw)
+        if out.get(key) is not None:
+            out[key] = tuple((str(n), float(t)) for n, t in out[key])
+    for key in _TRIPLE_LIST_FIELDS:
+        if out.get(key) is not None:
+            out[key] = tuple((str(n), float(a), float(b))
+                             for n, a, b in out[key])
+    for key in _DICT_LIST_FIELDS:
+        if out.get(key) is not None:
+            out[key] = tuple(dict(item) for item in out[key])
+    return out
 
 
 def apply_overrides(config: SimConfig, seed: int | None = None,

@@ -14,8 +14,11 @@ class TestEnums(unittest.TestCase):
         self.assertLess(Rel.R0, Rel.R3)
 
     def test_drop_reason_is_closed_set(self):
-        self.assertEqual(len(DropReason), 12)
+        # 13 = 原有 12 种 + STALE_SEQ。后者本来就由 accept() 返回并被写进
+        # 日志，却长期不在枚举里，"封闭枚举"这条约束在代码层面是假的。
+        self.assertEqual(len(DropReason), 13)
         self.assertEqual(DropReason.OCCLUDED.value, "OCCLUDED")
+        self.assertEqual(DropReason.STALE_SEQ.value, "STALE_SEQ")
 
     def test_event_kinds_are_json_friendly(self):
         for kind in EventKind:

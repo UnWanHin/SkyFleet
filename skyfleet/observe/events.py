@@ -9,7 +9,12 @@ import enum
 
 
 class DropReason(str, enum.Enum):
-    """消息被丢弃的原因。共 12 种。"""
+    """消息被丢弃的原因。共 13 种。
+
+    必须与实际写入日志的原因码一一对应：曾经 `STALE_SEQ` 会被
+    `accept()` 返回并当作原因写进日志，却不在本枚举里——"封闭枚举"
+    这条约束在代码层面是假的，只有测试才能发现。
+    """
 
     OCCLUDED = "OCCLUDED"                  # 几何遮挡导致链路不可用
     COLLISION = "COLLISION"                # 共享信道竞争冲突
@@ -20,6 +25,7 @@ class DropReason(str, enum.Enum):
     STALE_EPOCH = "STALE_EPOCH"            # 来自旧任期
     STALE_SESSION = "STALE_SESSION"        # 来自旧会话（重连前）
     STALE_VERSION = "STALE_VERSION"        # 旧 mission/route 版本
+    STALE_SEQ = "STALE_SEQ"                # 序号回退（重放或乱序）
     NO_ROUTE = "NO_ROUTE"                  # 当前通信关系不可达
     RATE_LIMITED = "RATE_LIMITED"          # 高优先级配额耗尽
     UNAUTHORIZED = "UNAUTHORIZED"          # 权限校验失败（P1 注入用）
@@ -31,6 +37,8 @@ class EventKind(str, enum.Enum):
     #: 世界描述（t=0）。有了它，一份日志就能**单独**重建全部画面，
     #: 不需要额外携带场景配置文件。
     SCENARIO_INIT = "SCENARIO_INIT"
+    #: P1 对抗注入：记录"投了什么"，用于与随后的 MSG_DROP 对账
+    ATTACK_INJECT = "ATTACK_INJECT"
     NODE_JOIN = "NODE_JOIN"
     NODE_LEAVE = "NODE_LEAVE"
     NODE_REJOIN = "NODE_REJOIN"

@@ -15,6 +15,10 @@ from skyfleet.kernel.rng import RngRegistry
 from skyfleet.observe.events import DropReason, EventKind
 from skyfleet.protocol.identity import IdentityRegistry
 from skyfleet.protocol.message import Msg, Rel
+
+#: 时效性指令：过了有效期就不该再被执行。心跳/遥测/ACK 迟到不影响
+#: 正确性，一律拒绝反而平白降低可达性，因此不在此列。
+TIMELY_ORDERS = frozenset({"TASK_ASSIGN", "TASK_REASSIGN"})
 from skyfleet.protocol.membership import MembershipParams, MembershipView
 from skyfleet.protocol.queue import RateLimiter, SendQueue
 from skyfleet.protocol.reliability import ReliabilityManager
@@ -227,6 +231,18 @@ class NodeAgent:
                            msg_id=msg.msg_id, msg_type=msg.msg_type,
                            src=msg.src, reason=DropReason.DEDUP)
             return AcceptDecision.DEDUP
+
+        # 有效期必须由**接收端**把关。此前 deadline 只有发送端在用（重传
+        # 超时），接收端从不检查，于是延迟到达或被人为注入的过期指令照样
+        # 会被执行——"过期控制消息"正是 §9 要求防的一类攻击。
+        # 只对时效性指令生效：心跳/遥测/ACK 迟到不影响正确性，
+        # 一律拒绝反而会平白降低可达性。
+        if msg.msg_type in TIMELY_ORDERS and msg.deadline < t:
+            self.log.write(EventKind.MSG_DROP, t, node_id=self.node.node_id,
+                           msg_id=msg.msg_id, msg_type=msg.msg_type,
+                           src=msg.src, dst=msg.dst,
+                           reason=DropReason.DEADLINE_MISSED)
+            return AcceptDecision.STALE_SEQ
 
         decision = accept(msg, self.view, self.dedup, t)
 

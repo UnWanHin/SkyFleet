@@ -8,3 +8,8 @@ __pycache__/
 out/logs/*.jsonl
 out/figures/**/*.png
 out/replay/*.html
+
+# 标定实验的逐次日志：每轮数万条事件，9 轮合计约 1.5 GB。
+# 它们可由 `study --spec` 完整重建，且 csv 汇总已含全部指标，
+# 因此只入库 spec.json / runs.csv / summary.md 三样。
+out/study/**/logs/
