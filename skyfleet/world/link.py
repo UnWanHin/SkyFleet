@@ -78,3 +78,24 @@ class GeometricOcclusionLinkModel:
             if segment_intersects_rect(start, end, building.rect):
                 return building.id
         return None
+
+
+def build_link_model(config, buildings):
+    """按配置构造链路模型。
+
+    工厂放在这里而不是引擎里：引擎只声明"我要一个链路模型"，
+    换成绕射模型或将来换成实测拟合模型都不需要改装配代码。
+    """
+    kind = (config.link_model or "geometric").lower()
+    if kind == "geometric":
+        return GeometricOcclusionLinkModel(buildings,
+                                           max_range=config.max_link_range)
+    if kind == "nlos":
+        from skyfleet.world.link_nlos import NlosDiffractionLinkModel
+        # 衰落用协议种子而非环境种子：城市布局要固定（共同随机数），
+        # 但每次重复应当采样不同的衰落实现，否则方差被系统性低估。
+        return NlosDiffractionLinkModel(buildings,
+                                        max_range=config.max_link_range,
+                                        seed=config.seed)
+    raise ValueError(f"未知链路模型 {config.link_model!r}，"
+                     f"可选 geometric / nlos")
