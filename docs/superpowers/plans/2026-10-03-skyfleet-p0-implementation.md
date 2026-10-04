@@ -1537,7 +1537,7 @@ python3 -m unittest discover -s tests -t .          # 系统 Python，跳过 5 �
 ```
 
 确定性验收：同一 `master_seed` 连续两次运行的规范化日志 SHA-256 一致
-（基线种子 1：`6f40ceea3386dcea521e700cb4f0da0452a080a0a50ff6d09500ab1e195ce76f`）。
+（基线种子 1：`aff4a602142b20c55fec107a7ebb1e7b8f115e4505490576c70254f4b259a854`）。
 
 **与计划的偏差**：实现过程中发现 11 处**模型/协议层面的缺陷**（不是调参），
 逐条记录在规格文档 §15，含理由、修正方式与实测数据。其中影响最大的三条：
@@ -1549,3 +1549,58 @@ python3 -m unittest discover -s tests -t .          # 系统 Python，跳过 5 �
 对应的测试改动：`tests/unit/test_channel.py` 重写为时隙模型；
 `tests/unit/test_version.py` 的 `last_seq` 键由 3 元组改为 4 元组；
 `tests/unit/test_agent.py` 新增周期消息不重传、R2 登记重传两条。
+
+---
+
+## 附：P1 验收记录（2026-10-04）
+
+P1 四项任务（参数标定 / 规模扩展 / 链路模型替换 / 扩展接口实现）全部完成，
+结果文档见 `docs/superpowers/specs/2026-10-04-p1-calibration-and-findings.md`。
+
+### 测试
+
+```
+python3 -m unittest discover -s tests -t .          # 系统 Python，跳过 5 个 matplotlib 测试
+.venv/bin/python -m unittest discover -s tests -t . # 含可视化，511 passed
+```
+
+P1 新增测试文件：
+
+| 文件 | 覆盖 |
+|---|---|
+| `tests/unit/test_link_nlos.py` | NLOS 绕射模型：协议一致性、LOS 单调性、掠射/深遮挡可分性（含对照组证明几何模型不可分）、遮挡边界连续性、确定性、衰落、缓存上界 |
+| `tests/unit/test_impairment.py` | 时间窗半开、半径门控、损伤按模型自身动态范围映射、多源叠加、装饰器保留底层遮挡信息 |
+| `tests/unit/test_position.py` | 漂移在时间片内恒定、失锁期间位置冻结且年龄增长、半开边界、多时段 |
+| `tests/unit/test_study.py`、`test_sweep_runner.py` | 网格展开、派生种子、t 分布区间、CSV/Markdown 汇总 |
+| `tests/unit/test_common_random_numbers.py` | 固定 `env_seed` 时城市一致、`seed` 变化不影响布局、方差收缩 |
+| `tests/integration/test_link_model_swap.py` | 工厂派发与未知值大声报错、AST 架构约束（协议层不得 import 任何链路模型）、协议层零改动 |
+| `tests/integration/test_injection_interfaces.py` | 四类注入的原因码、序号污染缺口、禁飞区/失锁的可观测效果 |
+| `tests/integration/test_log_invariants.py` | 日志中的 `reason` / `cause` / `attack_kind` 必须落在各自封闭集合内 |
+| `tests/determinism/test_golden_digest.py` | 摘要变更需附理由，含变更记录 |
+
+### 因 P1 而改动的实现
+
+| 改动 | 理由 |
+|---|---|
+| `NodeAgent.receive` 增加**接收端**有效期校验 | 原本 `deadline` 只有发送端在用，过期控制指令会被执行 |
+| `DropReason` 补入 `STALE_SEQ`（12 → 13） | 该值一直被写入日志却不在枚举内，"封闭枚举"是假的 |
+| `SAFETY_ACTION` 增加 `cause` 字段并参与变化检测 | 只比较动作时，"已在悬停、随后 GNSS 才失锁"完全不可见 |
+| `cli.py` 只翻译**可选依赖**的 ImportError | 原实现把代码里的真实 import 错误报成"缺少 skyfleet.world.geometry"，排查方向被带偏 |
+| `.gitignore` 排除 `out/study/**/logs/` | 9 轮扫参的逐次日志约 1.5 GB，可由命令重建 |
+
+### 摘要变更
+
+黄金摘要由 `d2e7e03b…` 依次变为 `7b63d742…` → `aff4a602…`，
+三次变化均**只增加观测字段**，仿真行为未变（事件总数 56588、完成率 100 %、
+控制丢包 5.23 %、心跳送达 99.48 %、丢弃原因分布逐项一致）。
+每次变更的原因已写进 `tests/determinism/test_golden_digest.py` 的变更记录。
+
+### 与预期的偏差（三条，均为实测推翻设计预期）
+
+1. **接入抖动不降低冲突，只降低冲突数的方差**；
+2. **中继门限在干净与峡谷场景下均无有效影响**（转发量翻倍，指标不动），
+   根因是中继布点与从机被同一批建筑遮挡；
+3. **基线指标来自"抽到一座矮城市"**——`env_seed=1` 控制丢包 5.9 %，
+   其余五个种子 25.6 %–33.1 %。基线数字必须标注布局。
+
+三条均已回写进设计文档对应小节（§15.5、§15.4）与 §16 的 P2 路线。
