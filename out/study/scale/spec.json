@@ -1,0 +1,41 @@
+{
+  "name": "scale",
+  "base": "skyfleet/scenarios/swarm_large.json",
+  "seed": 5,
+  "repeats": 3,
+  "grid": {
+    "slaves": [
+      4,
+      8,
+      16,
+      24
+    ]
+  },
+  "duration": null,
+  "metrics": [
+    "tasks.completion_rate",
+    "delivery_confirm.success_rate",
+    "latency_ms.Q1.mean",
+    "latency_ms.Q1.p95",
+    "latency_ms.Q2.mean",
+    "latency_ms.Q2.p95",
+    "latency_ms.Q3.mean",
+    "latency_ms.Q3.p95",
+    "loss.control_rate",
+    "loss.data_rate",
+    "drop_reasons.COLLISION",
+    "drop_reasons.OCCLUDED",
+    "heartbeat.delivery_rate",
+    "retransmission.total",
+    "retransmission.expired",
+    "route_switches",
+    "forwarded",
+    "recovery.mean_s",
+    "recovery.recovered",
+    "overhead.total_bytes",
+    "overhead.bytes_per_delivered_task",
+    "energy.min_final"
+  ],
+  "description": "集群规模对控制面的影响。任务数固定为 20、区域固定为 500 m，只增加从机数量——于是每节点负载随规模**下降**，任何劣化都只能来自信道竞争，而不是负载。这是把「规模」与「负载」两个因素分开的必要设计。",
+  "run_count": 12
+}

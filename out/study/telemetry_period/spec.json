@@ -1,0 +1,42 @@
+{
+  "name": "telemetry_period",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "telemetry_period": [
+      0.2,
+      0.35,
+      0.5,
+      1.0,
+      2.0
+    ]
+  },
+  "duration": null,
+  "metrics": [
+    "tasks.completion_rate",
+    "delivery_confirm.success_rate",
+    "latency_ms.Q1.mean",
+    "latency_ms.Q1.p95",
+    "latency_ms.Q2.mean",
+    "latency_ms.Q2.p95",
+    "latency_ms.Q3.mean",
+    "latency_ms.Q3.p95",
+    "loss.control_rate",
+    "loss.data_rate",
+    "drop_reasons.COLLISION",
+    "drop_reasons.OCCLUDED",
+    "heartbeat.delivery_rate",
+    "retransmission.total",
+    "retransmission.expired",
+    "route_switches",
+    "forwarded",
+    "recovery.mean_s",
+    "recovery.recovered",
+    "overhead.total_bytes",
+    "overhead.bytes_per_delivered_task",
+    "energy.min_final"
+  ],
+  "description": "遥测周期（即业务负载强度）对控制面丢包与时延的影响。周期越短负载越高，控制消息与遥测在信道上的竞争越激烈。这是「投递点附近节点聚集加剧信道竞争」在参数维度上的对应实验。",
+  "run_count": 15
+}

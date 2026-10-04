@@ -1,0 +1,10 @@
+{
+  "name": "slot_duration",
+  "description": "信道时隙粒度对竞争与交付的影响。时隙越短，落在同一时隙内的并发发送越少，冲突应当下降；但时隙过短又会让「接入等待」失去意义。这一轮用来确认 §15.1 的时隙化设计确实产生了可观测、可标定的竞争现象。",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "slot_duration": [0.0005, 0.001, 0.002, 0.005, 0.01]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "relay_threshold_clean",
+  "description": "中继启用门限（干净基线）。实测：门限从 0.3 提到 0.9，转发量从 1560 涨到 3297，而控制丢包率与心跳送达率**没有改善**，路由切换还从 5 次增到 8 次。即：在没有遮挡劣势的场景里，中继只增加空口负载。中继的价值必须到遮挡严重的场景里去验证（见 relay_threshold_stress）。",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "relay_direct_threshold": [
+      0.3,
+      0.45,
+      0.6,
+      0.75,
+      0.9
+    ]
+  }
+}

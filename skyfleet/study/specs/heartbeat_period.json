@@ -1,0 +1,10 @@
+{
+  "name": "heartbeat_period",
+  "description": "心跳周期对失联检测速度与开销的权衡。周期越短，故障发现越快，但控制面开销与竞争上升；周期过长则失联判定延迟、任务重派滞后。用于标定 §14.1 的心跳周期初值。",
+  "base": "skyfleet/scenarios/fault_chain.json",
+  "seed": 3,
+  "repeats": 3,
+  "grid": {
+    "heartbeat_period": [0.25, 0.5, 1.0, 2.0]
+  }
+}

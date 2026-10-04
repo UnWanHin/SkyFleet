@@ -1,0 +1,43 @@
+{
+  "name": "env_seed",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 2,
+  "grid": {
+    "env_seed": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "duration": null,
+  "metrics": [
+    "tasks.completion_rate",
+    "delivery_confirm.success_rate",
+    "latency_ms.Q1.mean",
+    "latency_ms.Q1.p95",
+    "latency_ms.Q2.mean",
+    "latency_ms.Q2.p95",
+    "latency_ms.Q3.mean",
+    "latency_ms.Q3.p95",
+    "loss.control_rate",
+    "loss.data_rate",
+    "drop_reasons.COLLISION",
+    "drop_reasons.OCCLUDED",
+    "heartbeat.delivery_rate",
+    "retransmission.total",
+    "retransmission.expired",
+    "route_switches",
+    "forwarded",
+    "recovery.mean_s",
+    "recovery.recovered",
+    "overhead.total_bytes",
+    "overhead.bytes_per_delivered_task",
+    "energy.min_final"
+  ],
+  "description": "城市布局敏感性。同一组协议参数，只换环境随机种子（楼高与站位重抽），用于量化「结论有多少来自协议、多少来自碰巧抽到的城市」。这也正是标定实验必须固定 env_seed 的理由：不固定的话，参数效应会被布局效应淹没。",
+  "run_count": 12
+}

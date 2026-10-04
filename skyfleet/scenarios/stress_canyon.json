@@ -1,29 +1,35 @@
 {
   "seed": 7,
+  "env_seed": 7,
   "duration": 600.0,
   "log_path": "out/logs/stress.jsonl",
-
   "area": 700.0,
   "blocks": 3,
   "gap": 20.0,
-  "height_range": [50.0, 120.0],
-  "flight_altitude": [110.0, 160.0],
+  "height_range": [
+    50.0,
+    120.0
+  ],
+  "flight_altitude": [
+    110.0,
+    160.0
+  ],
   "cruise_altitude": 140.0,
-  "delivery_altitude": [50.0, 90.0],
+  "delivery_altitude": [
+    50.0,
+    90.0
+  ],
   "node_speed": 12.0,
-
   "leader_id": "L",
   "slaves": 8,
   "relays": 2,
   "tasks": 20,
   "initial_energy": 100.0,
   "min_energy_for_task": 20.0,
-
   "heartbeat_period": 1.0,
   "telemetry_period": 0.25,
   "motion_period": 0.1,
   "queue_depth": 200,
-
   "channel_rate_bps": 2000000.0,
   "interference_range_m": 300.0,
   "max_link_range": 800.0,
@@ -31,27 +37,21 @@
   "relay_direct_threshold": 0.6,
   "retry_interval": 1.0,
   "slot_duration": 0.002,
-
   "q0_rate": 5.0,
   "q0_burst": 10.0,
   "q1_rate": 10.0,
   "q1_burst": 20.0,
-
   "n_degraded": 2,
   "n_suspect": 4,
   "t_fail": 3.0,
   "q_degraded": 0.4,
-
   "h_up": 0.75,
   "h_down": 0.35,
   "t_hold": 1.0,
   "flap_window": 5.0,
-
   "dedup_ttl": 30.0,
   "dedup_capacity": 5000,
-
-  "energy_tx_per_bit": 5.0e-7,
+  "energy_tx_per_bit": 5e-07,
   "energy_hover_per_s": 0.05,
-
   "telemetry_visibility": 300.0
 }

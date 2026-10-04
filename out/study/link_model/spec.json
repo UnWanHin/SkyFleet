@@ -1,0 +1,39 @@
+{
+  "name": "link_model",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "link_model": [
+      "geometric",
+      "nlos"
+    ]
+  },
+  "duration": null,
+  "metrics": [
+    "tasks.completion_rate",
+    "delivery_confirm.success_rate",
+    "latency_ms.Q1.mean",
+    "latency_ms.Q1.p95",
+    "latency_ms.Q2.mean",
+    "latency_ms.Q2.p95",
+    "latency_ms.Q3.mean",
+    "latency_ms.Q3.p95",
+    "loss.control_rate",
+    "loss.data_rate",
+    "drop_reasons.COLLISION",
+    "drop_reasons.OCCLUDED",
+    "heartbeat.delivery_rate",
+    "retransmission.total",
+    "retransmission.expired",
+    "route_switches",
+    "forwarded",
+    "recovery.mean_s",
+    "recovery.recovered",
+    "overhead.total_bytes",
+    "overhead.bytes_per_delivered_task",
+    "energy.min_final"
+  ],
+  "description": "链路模型对比：P0 几何遮挡（二值）vs P1 绕射+快衰落（连续）。两者在同一城市、同一协议下对比，用于回答「二值遮挡模型会把什么结论弄错」。",
+  "run_count": 6
+}

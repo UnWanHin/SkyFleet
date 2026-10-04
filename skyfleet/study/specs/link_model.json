@@ -1,0 +1,13 @@
+{
+  "name": "link_model",
+  "description": "链路模型对比：P0 几何遮挡（二值）vs P1 绕射+快衰落（连续）。两者在同一城市、同一协议下对比，用于回答「二值遮挡模型会把什么结论弄错」。",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "link_model": [
+      "geometric",
+      "nlos"
+    ]
+  }
+}

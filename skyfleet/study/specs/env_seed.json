@@ -1,0 +1,17 @@
+{
+  "name": "env_seed",
+  "description": "城市布局敏感性。同一组协议参数，只换环境随机种子（楼高与站位重抽），用于量化「结论有多少来自协议、多少来自碰巧抽到的城市」。这也正是标定实验必须固定 env_seed 的理由：不固定的话，参数效应会被布局效应淹没。",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 2,
+  "grid": {
+    "env_seed": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  }
+}

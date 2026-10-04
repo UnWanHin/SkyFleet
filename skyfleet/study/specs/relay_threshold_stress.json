@@ -1,0 +1,16 @@
+{
+  "name": "relay_threshold_stress",
+  "description": "中继启用门限（遮挡严重的压力场景）。与干净基线对照：若中继确有补线价值，这里应当看到丢包下降或交付改善，而不是仅仅转发量上升。",
+  "base": "skyfleet/scenarios/stress_canyon.json",
+  "seed": 7,
+  "repeats": 3,
+  "grid": {
+    "relay_direct_threshold": [
+      0.3,
+      0.45,
+      0.6,
+      0.75,
+      0.9
+    ]
+  }
+}

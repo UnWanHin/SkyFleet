@@ -1,0 +1,42 @@
+{
+  "name": "access_jitter",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "access_jitter": [
+      0.0,
+      0.01,
+      0.05,
+      0.1,
+      0.2
+    ]
+  },
+  "duration": null,
+  "metrics": [
+    "tasks.completion_rate",
+    "delivery_confirm.success_rate",
+    "latency_ms.Q1.mean",
+    "latency_ms.Q1.p95",
+    "latency_ms.Q2.mean",
+    "latency_ms.Q2.p95",
+    "latency_ms.Q3.mean",
+    "latency_ms.Q3.p95",
+    "loss.control_rate",
+    "loss.data_rate",
+    "drop_reasons.COLLISION",
+    "drop_reasons.OCCLUDED",
+    "heartbeat.delivery_rate",
+    "retransmission.total",
+    "retransmission.expired",
+    "route_switches",
+    "forwarded",
+    "recovery.mean_s",
+    "recovery.recovered",
+    "overhead.total_bytes",
+    "overhead.bytes_per_delivered_task",
+    "energy.min_final"
+  ],
+  "description": "周期发送的时钟漂移对冲突的影响。没有漂移时各节点是固定相位的排班表，同隙并发由相位差决定而非随机竞争；漂移把发送时刻打散，冲突应当显著下降。这一轮用于检验 §15.5「周期发送必须带漂移」这一判断。",
+  "run_count": 15
+}

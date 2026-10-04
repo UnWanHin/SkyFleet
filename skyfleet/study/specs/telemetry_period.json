@@ -1,0 +1,10 @@
+{
+  "name": "telemetry_period",
+  "description": "遥测周期（即业务负载强度）对控制面丢包与时延的影响。周期越短负载越高，控制消息与遥测在信道上的竞争越激烈。这是「投递点附近节点聚集加剧信道竞争」在参数维度上的对应实验。",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "telemetry_period": [0.2, 0.35, 0.5, 1.0, 2.0]
+  }
+}
