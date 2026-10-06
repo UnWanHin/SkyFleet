@@ -1,0 +1,13 @@
+{
+  "name": "energy_model",
+  "description": "能量模型对比：linear（与飞行状态无关的恒定扣费，P0/P1 行为）vs physical（四旋翼动量理论，按悬停/巡航/爬升/下降计费）。用于回答「恒定时钟把什么结论弄错」，并量化被迫悬停的代价。协议层零改动——换模型不影响交付率与丢失率。",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "energy_model": [
+      "linear",
+      "physical"
+    ]
+  }
+}

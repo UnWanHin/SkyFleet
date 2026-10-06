@@ -1,0 +1,18 @@
+{
+  "name": "airframe",
+  "description": "机型与载荷对比：同一场景换四种真实机型（参数取自 RotorPy 3.0）并加不同载荷。用于回答「换机型会不会改变任务结果」——分析文档 §3 的结论是常规飞行不饱和，故**协议结果应当不变**，只有能耗规模变化。若交付率随载荷变化，说明该结论需要修正。",
+  "base": "skyfleet/scenarios/baseline_physical.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "airframe": [
+      "crazyflie",
+      "hummingbird",
+      "px4_sihsim_quadx"
+    ],
+    "payload_kg": [
+      0.0,
+      0.5
+    ]
+  }
+}

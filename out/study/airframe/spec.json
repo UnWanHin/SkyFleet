@@ -1,0 +1,44 @@
+{
+  "name": "airframe",
+  "base": "skyfleet/scenarios/baseline_physical.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "airframe": [
+      "crazyflie",
+      "hummingbird",
+      "px4_sihsim_quadx"
+    ],
+    "payload_kg": [
+      0.0,
+      0.5
+    ]
+  },
+  "duration": null,
+  "metrics": [
+    "tasks.completion_rate",
+    "delivery_confirm.success_rate",
+    "latency_ms.Q1.mean",
+    "latency_ms.Q1.p95",
+    "latency_ms.Q2.mean",
+    "latency_ms.Q2.p95",
+    "latency_ms.Q3.mean",
+    "latency_ms.Q3.p95",
+    "loss.control_rate",
+    "loss.data_rate",
+    "drop_reasons.COLLISION",
+    "drop_reasons.OCCLUDED",
+    "heartbeat.delivery_rate",
+    "retransmission.total",
+    "retransmission.expired",
+    "route_switches",
+    "forwarded",
+    "recovery.mean_s",
+    "recovery.recovered",
+    "overhead.total_bytes",
+    "overhead.bytes_per_delivered_task",
+    "energy.min_final"
+  ],
+  "description": "机型与载荷对比：同一场景换四种真实机型（参数取自 RotorPy 3.0）并加不同载荷。用于回答「换机型会不会改变任务结果」——分析文档 §3 的结论是常规飞行不饱和，故**协议结果应当不变**，只有能耗规模变化。若交付率随载荷变化，说明该结论需要修正。",
+  "run_count": 18
+}

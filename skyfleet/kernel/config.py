@@ -142,6 +142,21 @@ class SimConfig:
     energy_tx_per_bit: float = 5.0e-7
     energy_hover_per_s: float = 0.05
 
+    #: 飞行能量模型："linear"（与飞行状态无关的恒定扣费，P0/P1 行为）
+    #: 或 "physical"（四旋翼动量理论，按悬停/巡航/爬升/下降分别计费）。
+    #: 默认 linear 是**刻意的**：换成 physical 会改变所有已发表的扫描
+    #: 结果与 golden digest，那应当是有意识的重新基线，不是顺手改掉。
+    #: 分析见 docs/analysis/2026-10-05-thrust-margin-analysis.md
+    energy_model: str = "linear"
+    #: physical 模型使用的机型，名字取自 skyfleet/world/power.AIRFRAMES
+    airframe: str = "px4_sihsim_quadx"
+    #: 载荷（含投递物），kg
+    payload_kg: float = 0.0
+    #: 电池容量，Wh。physical 模型把瓦特换算成百分比电量的基准。
+    #: None 表示采用该机型的典型容量（见 power.AIRFRAMES）——不要用一个
+    #: 全局默认值，否则会给 30 g 机型配上 1 kg 机型的电池。
+    battery_capacity_wh: float | None = None
+
     # 可见性
     telemetry_visibility: float = 300.0
 

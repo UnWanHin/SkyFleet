@@ -1,0 +1,39 @@
+{
+  "name": "energy_model",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "energy_model": [
+      "linear",
+      "physical"
+    ]
+  },
+  "duration": null,
+  "metrics": [
+    "tasks.completion_rate",
+    "delivery_confirm.success_rate",
+    "latency_ms.Q1.mean",
+    "latency_ms.Q1.p95",
+    "latency_ms.Q2.mean",
+    "latency_ms.Q2.p95",
+    "latency_ms.Q3.mean",
+    "latency_ms.Q3.p95",
+    "loss.control_rate",
+    "loss.data_rate",
+    "drop_reasons.COLLISION",
+    "drop_reasons.OCCLUDED",
+    "heartbeat.delivery_rate",
+    "retransmission.total",
+    "retransmission.expired",
+    "route_switches",
+    "forwarded",
+    "recovery.mean_s",
+    "recovery.recovered",
+    "overhead.total_bytes",
+    "overhead.bytes_per_delivered_task",
+    "energy.min_final"
+  ],
+  "description": "能量模型对比：linear（与飞行状态无关的恒定扣费，P0/P1 行为）vs physical（四旋翼动量理论，按悬停/巡航/爬升/下降计费）。用于回答「恒定时钟把什么结论弄错」，并量化被迫悬停的代价。协议层零改动——换模型不影响交付率与丢失率。",
+  "run_count": 6
+}

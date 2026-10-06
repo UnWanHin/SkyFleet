@@ -42,6 +42,7 @@ from skyfleet.world.geofence import build_geofences
 from skyfleet.world.impairment import wrap_with_impairments
 from skyfleet.world.link import LinkModel, build_link_model
 from skyfleet.world.position import build_position_source
+from skyfleet.world.power import build_energy_model
 from skyfleet.world.mobility import WaypointMover
 from skyfleet.world.node import Node
 
@@ -61,6 +62,20 @@ EV_CHANNEL = "chan"
 BROADCAST = "*"
 
 LEASE_TTL = 1_000_000.0
+
+
+def _step_velocities(before, after, dt: float) -> tuple[float, float]:
+    """由一步的实际位移推出 (水平速度, 垂直速度)。
+
+    用位移而不是"看航线还剩哪一段"来判断飞行状态：位移是精确的、
+    与航线规划无关，且天然把斜向航段分解成两个分量。
+    """
+    if dt <= 0.0:
+        return 0.0, 0.0
+    dx = after[0] - before[0]
+    dy = after[1] - before[1]
+    dz = after[2] - before[2]
+    return math.hypot(dx, dy) / dt, dz / dt
 
 
 @dataclass
@@ -158,6 +173,7 @@ class Engine:
         self.link_model = wrap_with_impairments(
             build_link_model(cfg, self.buildings), cfg)
         self.position_source = build_position_source(cfg)
+        self.energy = build_energy_model(cfg)
         self.geofences = build_geofences(cfg)
         self.adversary = AdversaryInjector.from_config(cfg)
 
@@ -429,8 +445,13 @@ class Engine:
             agent = self.agents[node_id]
             if not agent.alive or mover is None:
                 continue
-            agent.spend_energy(cfg.energy_hover_per_s * dt)
+            # 按**实际位移**判定飞行状态再计费：位移是精确的，不需要
+            # 从航线推测当前是在爬升还是平飞。linear 模型忽略这两个
+            # 速度，因此结果与 P0/P1 逐位一致。
+            before = agent.node.pos
             mover.step(dt)
+            v_h, v_z = _step_velocities(before, agent.node.pos, dt)
+            agent.spend_energy(self.energy.energy_for_step(v_h, v_z, dt))
             # 只有**整条航线走完**才算抵达任务点。航线含巡航转场点，
             # 若把"到达任意一个航点"当成抵达，无人机会在巡航高度上
             # 直接开始投递，永远不下降进入峡谷。
