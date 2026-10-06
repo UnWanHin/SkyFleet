@@ -131,16 +131,22 @@ class TestAdversaryIsRejectedByTheProtocol(unittest.TestCase):
         # 不是新造一个 EXPIRED——封闭枚举的意义就在于复用已有语义。
         self.assertEqual(drops[0]["reason"], "DEADLINE_MISSED")
 
-    def test_high_sequence_spoofing_poisons_the_victims_sequence_state(self):
-        """**已知缺口**：序号检查只做单调比较，没有上界校验。
+    def test_high_sequence_spoofing_is_now_rejected(self):
+        """★ 原缺口**已修复**，本测试即其防护回归。
 
-        攻击者冒充 S1 发一条 seq 极大的消息。它会通过会话、任期、去重
-        与序号检查（因为"更大"看起来就是"更新"），把主节点记的
-        last_seq 推到极大值；此后 S1 的**真实**心跳全部小于它，
-        一律被判 STALE_SEQ——攻击者用一个包就让一个节点从主节点视野里消失。
+        原实现只做单调比较、没有上界：冒充者发一条 seq = 10^7 的消息
+        就能把 last_seq 推到极大，此后真实心跳全部被判 STALE_SEQ，
+        **一个包就让节点从主节点视野里消失**（单封包拒绝服务）。
 
-        这条测试断言的是"当前确实如此"。将来补上序号窗口校验后，
-        它会失败，届时应当把它改写成"注入被拒"，而不是把断言删掉。
+        修复包含两处，缺一不可：
+        1. 滑动窗口：越窗判 `SEQ_OUT_OF_WINDOW` 且**不推进窗口**；
+        2. 发送端**按消息类型分流序号**——原先全节点共用一个计数器，
+           导致任一 (src, msg_type) 子序列的合法跳跃无界（实测最大 969），
+           窗口在这种前提下没有意义。
+
+        注：无认证时**先到的**冒充者仍防不住（见
+        `tests/unit/test_version.py::test_a_first_arriving_spoofer_is_a_known_residual_gap`）。
+        本测试覆盖的是现实情形——被冒充的节点一直在发心跳，基准已存在。
         """
         with tempfile.TemporaryDirectory() as tmp:
             config = scenario(tmp, duration=20.0, adversary=[{
@@ -149,17 +155,23 @@ class TestAdversaryIsRejectedByTheProtocol(unittest.TestCase):
             events = list(read_log(Engine(config).run()))
 
         injected = [e for e in events if e["kind"] == "ATTACK_INJECT"][0]
-        self.assertFalse(
-            [e for e in events if e["kind"] == "MSG_DROP"
-             and e.get("msg_id") == injected["msg_id"]
-             and e.get("node_id") == "L"],
-            "前提变了：超大序号已被拒绝，可以把这个缺口测试改写为防护测试")
+        # 1) 注入包被拒，且原因码是**越窗**而非"过期"——两者分开才能
+        #    在日志里区分"被攻击"与"自己掉线"。
+        drops = [e for e in events if e["kind"] == "MSG_DROP"
+                 and e.get("msg_id") == injected["msg_id"]
+                 and e.get("node_id") == "L"]
+        self.assertTrue(drops, "注入的超大序号没有被拒绝")
+        self.assertEqual(drops[0]["reason"], "SEQ_OUT_OF_WINDOW",
+                         "越窗被记成了别的（或与 STALE_SEQ 混用），攻击不可观测")
 
-        victim_drops = [e for e in events if e["kind"] == "MSG_DROP"
-                        and e.get("reason") == "STALE_SEQ"
-                        and e.get("src") == "S1" and e["t"] > 6.0]
-        self.assertTrue(victim_drops,
-                        "未观察到序号污染：真实节点的心跳没有被误判为过期")
+        # 2) 真实节点**不受影响**：注入之后 S1 的心跳必须继续被接受。
+        #    这一条才是原缺口的正面复现。
+        after = [e for e in events if e["kind"] == "MSG_DUP"
+                 and e.get("src") == "S1" and e.get("reason") == "STALE_SEQ"
+                 and e["t"] > 6.0]
+        self.assertFalse(
+            after,
+            "注入之后 S1 的真实心跳仍被误判为过期——单封包 DoS 未被挡住")
 
     def test_replay_of_a_known_node_is_rejected_by_sequence_check(self):
         """重放必须带真实节点的真实会话，否则会被会话校验顺手挡下，

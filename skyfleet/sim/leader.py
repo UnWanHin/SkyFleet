@@ -107,7 +107,8 @@ class LeaderController:
         from skyfleet.protocol.message import Msg
         return Msg.new(
             "TASK_ASSIGN", src=self.config.leader_id, dst=node_id, t=t,
-            msg_id=self.agent.new_msg_id(), seq=self.agent.next_seq(),
+            msg_id=self.agent.new_msg_id(),
+            seq=self.agent.next_seq("TASK_ASSIGN"),
             session_id=self.agent.session_id,
             leader_epoch=self.agent.leader_epoch,
             mission_version=self.mission_version,

@@ -19,6 +19,9 @@ class AcceptDecision(enum.Enum):
     STALE_SESSION = "STALE_SESSION"
     STALE_VERSION = "STALE_VERSION"
     STALE_SEQ = "STALE_SEQ"
+    #: 序号跃变超出滑动窗口。**必须与 STALE_SEQ 分开**：混用会让
+    #: "有人冒充" 和 "我自己掉线" 在日志里长得一模一样，攻击不可观测。
+    SEQ_OUT_OF_WINDOW = "SEQ_OUT_OF_WINDOW"
     DEDUP = "DEDUP"
 
 
@@ -65,8 +68,16 @@ class DedupTable:
         return len(self._expires)
 
 
+#: 序号滑动窗口的默认宽度。
+#:
+#: 必须大于"正常乱序能拉开的距离"，否则会把真实的乱序包误判为攻击。
+#: 发送端每个周期递增 1，乱序距离受在途包数限制；64 远大于实测的最大
+#: 乱序距离，又远小于冒充者的跃变尺度（10^7 量级）。
+DEFAULT_SEQ_WINDOW = 64
+
+
 def accept(msg: Msg, view: LocalView, dedup: DedupTable,
-           t: float) -> AcceptDecision:
+           t: float, seq_window: int = DEFAULT_SEQ_WINDOW) -> AcceptDecision:
     """判定是否接受一条消息。
 
     规则顺序不可调换：任期 -> 会话 -> 任务版本 -> 去重 -> 序列。
@@ -86,9 +97,20 @@ def accept(msg: Msg, view: LocalView, dedup: DedupTable,
     # 发送序号，但它们互不排序；若把 msg_type 排除在键外，一条乱序到达的
     # 遥测就会把紧随其后的心跳误判为过期，凭空造出一次"心跳丢失"。
     key = (msg.src, msg.msg_type, msg.leader_epoch, msg.mission_version)
+    # 序号必须落在**滑动窗口**内，而不是无上界的单调比较。
+    #
+    # 原实现只有 `last_seq[key] = msg.seq`，没有任何上界。冒充者发送一个
+    # seq = 10^7 的包就能把 last_seq 推到 10^7，此后所有真实心跳（seq
+    # 只有几十）都满足 seq <= previous 而被判 STALE_SEQ——**单封包 DoS**。
+    #
+    # 关键：越窗时**不推进窗口**。否则冒充者只要连发 last_seq + W 就能
+    # 把窗口一步步推到任意远处，DoS 依旧成立。
     previous = view.last_seq.get(key)
-    if previous is not None and msg.seq <= previous:
-        return AcceptDecision.STALE_SEQ
+    if previous is not None:
+        if msg.seq <= previous:
+            return AcceptDecision.STALE_SEQ
+        if msg.seq > previous + seq_window:
+            return AcceptDecision.SEQ_OUT_OF_WINDOW
 
     view.leader_epoch = max(view.leader_epoch, msg.leader_epoch)
     view.mission_version = max(view.mission_version, msg.mission_version)

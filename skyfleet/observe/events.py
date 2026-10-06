@@ -9,7 +9,7 @@ import enum
 
 
 class DropReason(str, enum.Enum):
-    """消息被丢弃的原因。共 13 种。
+    """消息被丢弃的原因。共 14 种。
 
     必须与实际写入日志的原因码一一对应：曾经 `STALE_SEQ` 会被
     `accept()` 返回并当作原因写进日志，却不在本枚举里——"封闭枚举"
@@ -26,6 +26,9 @@ class DropReason(str, enum.Enum):
     STALE_SESSION = "STALE_SESSION"        # 来自旧会话（重连前）
     STALE_VERSION = "STALE_VERSION"        # 旧 mission/route 版本
     STALE_SEQ = "STALE_SEQ"                # 序号回退（重放或乱序）
+    #: 序号跃变超出滑动窗口——冒充者的特征。与 STALE_SEQ 分开，
+    #: 才能把"被攻击"与"自己掉线"在日志里区分开。
+    SEQ_OUT_OF_WINDOW = "SEQ_OUT_OF_WINDOW"
     NO_ROUTE = "NO_ROUTE"                  # 当前通信关系不可达
     RATE_LIMITED = "RATE_LIMITED"          # 高优先级配额耗尽
     UNAUTHORIZED = "UNAUTHORIZED"          # 权限校验失败（P1 注入用）

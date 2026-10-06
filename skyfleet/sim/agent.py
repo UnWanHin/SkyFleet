@@ -74,7 +74,14 @@ class NodeAgent:
         #: 消息类型 -> 业务层处理器（仅装配层会注册）
         self.handlers: dict[str, Callable[[Msg, float, float], None]] = {}
 
-        self._seq = 0
+        #: 每个消息类型各自一个发送序号。
+        #:
+        #: 原实现是**每节点一个全局计数器**，于是任一 (src, msg_type)
+        #: 子序列都会跳过其他所有类型：实测 L 的 ACK 流合法前向跳跃
+        #: 中位数 2、最大 969。接收端按 (src, msg_type) 校验序号，
+        #: 因此滑动窗口的上界是**无界的**——窗口再大也只是碰运气。
+        #: 分流计数后，跳跃只反映**该流自身的丢包**，上界才有意义。
+        self._seq: dict[str, int] = {}
         self._msg_seq = 0
         self._enqueue_t: dict[str, float] = {}
         self._dequeue_t: dict[str, float] = {}
@@ -102,9 +109,11 @@ class NodeAgent:
     def dequeue_time(self, msg_id: str) -> float | None:
         return self._dequeue_t.get(msg_id)
 
-    def next_seq(self) -> int:
-        self._seq += 1
-        return self._seq
+    def next_seq(self, msg_type: str) -> int:
+        """该消息类型流的下一个序号。必须传类型——见 `_seq` 的说明。"""
+        value = self._seq.get(msg_type, 0) + 1
+        self._seq[msg_type] = value
+        return value
 
     # ---------- 周期性流量 ----------
 
@@ -126,7 +135,7 @@ class NodeAgent:
         return Msg.new(
             "HEARTBEAT", src=self.node.node_id, dst=dst, t=t,
             msg_id=self.new_msg_id(),
-            seq=self.next_seq(), session_id=self.session_id,
+            seq=self.next_seq("HEARTBEAT"), session_id=self.session_id,
             leader_epoch=self.leader_epoch,
             mission_version=self.mission_version,
             route_version=self.routing.route_version,
@@ -136,7 +145,7 @@ class NodeAgent:
     def _telemetry(self, t: float) -> Msg:
         return Msg.new(
             "TELEMETRY", src=self.node.node_id, dst=self.config.leader_id,
-            t=t, msg_id=self.new_msg_id(), seq=self.next_seq(),
+            t=t, msg_id=self.new_msg_id(), seq=self.next_seq("TELEMETRY"),
             session_id=self.session_id,
             leader_epoch=self.leader_epoch,
             mission_version=self.mission_version,
@@ -283,7 +292,7 @@ class NodeAgent:
 
     def _send_ack(self, original: Msg, t: float) -> None:
         ack = Msg.new("ACK", src=self.node.node_id, dst=original.src, t=t,
-                      msg_id=self.new_msg_id(), seq=self.next_seq(),
+                      msg_id=self.new_msg_id(), seq=self.next_seq("ACK"),
                       session_id=self.session_id,
                       leader_epoch=self.leader_epoch,
                       mission_version=self.mission_version,

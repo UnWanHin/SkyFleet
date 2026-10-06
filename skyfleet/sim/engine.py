@@ -607,7 +607,8 @@ class Engine:
         agent = self.agents[node_id]
         msg = Msg.new("DELIVERY_CONFIRM", src=node_id,
                       dst=self.config.leader_id,
-                      t=t, msg_id=agent.new_msg_id(), seq=agent.next_seq(),
+                      t=t, msg_id=agent.new_msg_id(),
+                      seq=agent.next_seq("DELIVERY_CONFIRM"),
                       session_id=agent.session_id,
                       leader_epoch=agent.leader_epoch,
                       mission_version=self.leader.mission_version,
