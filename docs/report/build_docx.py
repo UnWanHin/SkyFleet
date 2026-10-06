@@ -10,7 +10,7 @@
     python3 docs/report/build_docx.py            # 用默认路径
     python3 docs/report/build_docx.py 源.html 目标.docx
 
-只支持本目录 HTML 用到的那一小撮标签（h1/h2/h3、p、table、img、
+只支持本目录 HTML 用到的那一小撮标签（h1~h4、p、ul/li、table、img、
 code、b、i、sup、caption）。它**不是**通用转换器：遇到不认识的标签
 直接报错，避免"静默丢内容"——文档交付物里少一段话是查不出来的。
 """
@@ -49,7 +49,7 @@ WP = ('xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/'
 # --------------------------------------------------------------------------
 
 class Block:
-    """一个块级元素。kind ∈ {h1,h2,h3,p,table,img,caption}。"""
+    """一个块级元素。kind ∈ {h1..h4,p,li,table,img,caption}。"""
 
     def __init__(self, kind: str, **kw):
         self.kind = kind
@@ -84,14 +84,42 @@ class Extract(HTMLParser):
         elif tag == "code":
             self.text.append("<code>")
 
+    #: 转换器认识的全部标签。**不在这个集合里的块级标签一律报错**——
+    #: 早前只对「已生成但类型未知的块」报错，而未知标签根本不会生成块，
+    #: 于是 `<section>一段重要的话</section>` 会被整段无声吞掉：
+    #: 文本只在已知栈元素内才被收集，未知标签既不压栈也不报错。
+    #: 文档交付物少一段话，任何格式检查都发现不了。
+    #: 产生内容的标签。
+    CONTENT_TAGS = frozenset({
+        "h1", "h2", "h3", "h4", "p", "ul", "li", "table", "tr", "td", "th",
+        "caption", "img", "b", "i", "sup", "code", "br",
+    })
+    #: 只做包裹、不产生内容的标签。**必须显式列出**——把它们混进
+    #: CONTENT_TAGS 会让「未知标签」的检查失去意义，而直接忽略又回到了
+    #: 静默丢内容的老问题。
+    WRAPPER_TAGS = frozenset({
+        "html", "head", "body", "meta", "title", "style", "link",
+    })
+    KNOWN_TAGS = CONTENT_TAGS | WRAPPER_TAGS
+
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
-        if tag in ("h1", "h2", "h3"):
+        if tag in self.WRAPPER_TAGS:
+            return
+        if tag not in self.KNOWN_TAGS:
+            raise ValueError(
+                f"遇到不认识的标签 <{tag}>。转换器不是通用转换器，"
+                f"为避免静默丢内容，未知标签一律报错。"
+                f"已知标签：{sorted(self.KNOWN_TAGS)}")
+        if tag in ("h1", "h2", "h3", "h4"):
             self.stack.append(tag)
             self.text = []
-        elif tag == "p":
+        elif tag == "p" or tag == "li":
+            # <li> 与 <p> 同路，只在排版时加项目符号。
             self.stack.append(tag)
             self.text = []
+        elif tag == "ul":
+            pass          # 容器本身不产生块，仅用于分组
         elif tag == "table":
             self.stack.append(tag)
             self.rows = []
@@ -118,7 +146,11 @@ class Extract(HTMLParser):
             self.text.append("\n")
 
     def handle_endtag(self, tag):
-        if tag in ("h1", "h2", "h3", "p"):
+        if tag in self.WRAPPER_TAGS:
+            return
+        if tag not in self.KNOWN_TAGS:
+            raise ValueError(f"遇到不认识的结束标签 </{tag}>")
+        if tag in ("h1", "h2", "h3", "h4", "p", "li"):
             self.stack.pop()
             self.blocks.append(Block(tag, runs=self._runs("".join(self.text))))
             self.text = []
@@ -186,7 +218,8 @@ def parse_html(path: Path) -> list[Block]:
     parser = Extract()
     parser.feed(path.read_text(encoding="utf-8"))
     unknown = [b.kind for b in parser.blocks
-               if b.kind not in ("h1", "h2", "h3", "p", "table", "img")]
+               if b.kind not in ("h1", "h2", "h3", "h4", "p", "li",
+                                 "table", "img")]
     if unknown:
         raise ValueError(f"出现未处理的块级元素：{set(unknown)}")
     return parser.blocks
@@ -306,6 +339,12 @@ STYLES = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/>
 <w:pPr><w:keepNext/><w:spacing w:before="220" w:after="120"/><w:jc w:val="left"/></w:pPr>
 <w:rPr><w:rFonts w:eastAsia="{FONT_SANS}"/><w:b/><w:sz w:val="23"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/>
+<w:pPr><w:keepNext/><w:spacing w:before="180" w:after="100"/><w:jc w:val="left"/></w:pPr>
+<w:rPr><w:rFonts w:eastAsia="{FONT_SANS}"/><w:b/><w:sz w:val="21"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Bullet"><w:name w:val="List Bullet"/>
+<w:pPr><w:spacing w:before="20" w:after="20"/><w:ind w:left="420" w:hanging="210"/>
+<w:jc w:val="both"/></w:pPr><w:rPr><w:sz w:val="21"/></w:rPr></w:style>
 <w:style w:type="paragraph" w:styleId="TableCaption"><w:name w:val="Table Caption"/>
 <w:pPr><w:keepNext/><w:spacing w:before="160" w:after="60"/><w:jc w:val="left"/></w:pPr>
 <w:rPr><w:b/><w:sz w:val="19"/></w:rPr></w:style>
@@ -377,10 +416,16 @@ def build(html_path: Path, docx_path: Path) -> tuple[int, int, int]:
 
     body = []
     for b in blocks:
-        if b.kind in ("h1", "h2", "h3"):
+        if b.kind in ("h1", "h2", "h3", "h4"):
             body.append(para_xml(b.runs, f"Heading{b.kind[1]}", jc="left"))
         elif b.kind == "p":
             body.append(para_xml(b.runs, "BodyText"))
+        elif b.kind == "li":
+            # 项目符号用文本前缀而非 numbering.xml：后者要引入 numbering
+            # part 与 numId 映射，为一个小节徒增一处可能静默失效的机制。
+            bullet = [{"text": "· ", "bold": False, "italic": False,
+                       "sup": False, "code": False}] + b.runs
+            body.append(para_xml(bullet, "Bullet"))
         elif b.kind == "table":
             body.append(table_xml(b, rel_ids))
         elif b.kind == "img":
@@ -454,7 +499,8 @@ def build(html_path: Path, docx_path: Path) -> tuple[int, int, int]:
             z.writestr(info, path.read_bytes())
 
     n_tables = sum(1 for b in blocks if b.kind == "table")
-    n_paras = sum(1 for b in blocks if b.kind in ("h1", "h2", "h3", "p"))
+    n_paras = sum(1 for b in blocks
+                  if b.kind in ("h1", "h2", "h3", "h4", "p", "li"))
     return len(blocks), n_tables, len(rel_ids)
 
 

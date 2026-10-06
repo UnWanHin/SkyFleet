@@ -907,7 +907,9 @@ SkyFleet/
 `docs/analysis/2026-10-05-thrust-margin-analysis.md` §11。重做后
 （3 策略 × 6 布局 × 3 重复）：以布局配对，`none − crash` 差 +0.043，
 **t = 1.96（df=5，临界值 2.571），不显著**；6 个布局中 1 个方向相反。
-**布局解释完成率变异的约 96%，耗尽处置策略只是二阶效应。**
+**布局解释完成率变异的约 94%，耗尽处置策略只是二阶效应。**
+（该占比由 `docs/report/build_energy_section.py::variance_share()` 从
+`out/study/battery_policy_layout/runs.csv` 现算，报告正文与文档共用同一函数。）
 
 **方法学教训（必须随数字一起报告）**：
 

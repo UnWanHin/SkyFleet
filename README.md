@@ -11,6 +11,20 @@
 
 ---
 
+### 报告章节的构建（交付物）
+
+`docs/report/2026-10-04-results-chapter.html` 的**数字是生成的，不是手抄的**：
+
+```bash
+python3 docs/report/build_energy_section.py          # 从 out/study/*/runs.csv 生成正文
+python3 docs/report/build_docx.py                    # HTML -> docx（零依赖 OOXML）
+```
+
+两层转换都不会在数据变化时自己报警，因此 `tests/integration/test_report_artifact.py`
+把「交付物与数据一致」变成断言：HTML 必须与生成器逐字节一致、docx 必须能构建
+并通过 OOXML 分部件与表格结构校验、必需的表号与小节必须真的在正文里。
+改动扫描数据后忘记重跑生成器，会直接变红。
+
 ## 快速开始
 
 ```bash
@@ -124,7 +138,7 @@ docs/superpowers/
 
 ```bash
 python3 -m unittest discover -s tests -t .            # 系统 Python，跳过 5 个画图测试
-.venv/bin/python -m unittest discover -s tests -t .   # 含可视化，603 passed
+.venv/bin/python -m unittest discover -s tests -t .   # 含可视化，630 passed
 ```
 
 **确定性是第一验收项**：同一 `master_seed` 连续两次运行，规范化日志的
@@ -222,7 +236,7 @@ ACK 也回不来，所以投递完成后先爬升脱离遮挡再上报。遮挡�
 - **重做后（3 策略 × 6 布局 × 3 重复 = 54 次）**：以布局配对，
   `none − crash` 完成率差为 **+0.043，t = 1.96（df=5，临界值 2.571），
   不显著**；6 个布局中有 1 个方向相反。
-- **修正后的结论**：续航受限场景里**城市布局解释了完成率变异的约 96 %**
+- **修正后的结论**：续航受限场景里**城市布局解释了完成率变异的约 94 %**
   （布局间 sd 0.304，布局内 sd 0.059）。**决定成败的是城市布局，
   不是耗尽处置策略。**
 - 转发量**双峰**（走直连或经中继，总字节只差 4 %），而且
