@@ -28,7 +28,7 @@ SAFETY_CAUSES = frozenset({"NONE", "GEOFENCE", "LOW_BATTERY",
 #: 完全正常的 SILENT/REVIVE 判成错误，或者反过来放过真正的越界值。
 CAUSE_SETS = {
     "SAFETY_ACTION": SAFETY_CAUSES,
-    "NODE_LEAVE": frozenset({"SILENT"}),
+    "NODE_LEAVE": frozenset({"SILENT", "BATTERY"}),
     "NODE_JOIN": frozenset({"REVIVE"}),
 }
 
@@ -64,6 +64,8 @@ def busy_scenario(tmp, name, **overrides):
 
 
 class TestLogInvariants(unittest.TestCase):
+    """默认配置下的日志不变量。"""
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
@@ -159,3 +161,49 @@ class TestLogInvariants(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLogInvariantsUnderBatteryCrash(TestLogInvariants):
+    """把电量耗尽处置打开，让 crash 路径也被同一组不变量覆盖。
+
+    否则 `BATTERY` 这个 cause 值只在非默认配置下出现，而默认场景里
+    永远看不到它——CAUSE_SETS 的子集检查会**空转放行**。这类"守衛只
+    覆盖默认路徑"的漏洞最难发现：测试全绿，覆盖为零。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        config = busy_scenario(
+            cls.tmp.name, "invariants_crash",
+            on_battery_empty="crash",
+            # 让电量真的耗尽：场景 40 s、线性模型 0.05/s 共耗 2.0 单位，
+            # 故初始电量取 1.0 才能在中途归零。同时不能因低电而停止接任务。
+            initial_energy=1.0, min_energy_for_task=0.0)
+        cls.events = list(read_log(Engine(config).run()))
+        assert cls.events, "场景没有产生任何事件"
+
+    def test_determinism_with_battery_crash_enabled(self):
+        """父类那条确定性测试调用 busy_scenario 时**没有**带 crash 设定，
+        因此它在这里复测的是默认策略的确定性，而不是崩溃路径的。
+        重写一遍，让本类的确定性断言真的覆盖 crash。
+        """
+        from skyfleet.observe.log import normalised_digest
+        digests = []
+        for tag in ("cr1", "cr2"):
+            config = busy_scenario(self.tmp.name, tag,
+                                   on_battery_empty="crash",
+                                   initial_energy=1.0,
+                                   min_energy_for_task=0.0)
+            Engine(config).run()
+            digests.append(normalised_digest(config.log_path))
+        self.assertEqual(digests[0], digests[1])
+
+    def test_the_crash_path_actually_fired(self):
+        """先确认这条路径真的被走到了，否则本类只是重复父类。"""
+        kinds = {e["kind"] for e in self.events}
+        self.assertIn("BATTERY_EMPTY", kinds,
+                      "崩溃路径没有被走到，本类的断言全部空转")
+        self.assertIn("BATTERY",
+                      {e.get("cause") for e in self.events
+                       if e["kind"] == "NODE_LEAVE"})

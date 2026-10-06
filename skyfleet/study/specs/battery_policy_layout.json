@@ -1,0 +1,22 @@
+{
+  "name": "battery_policy_layout",
+  "description": "电量耗尽处置 × 城市布局。**这是 battery_policy 的正确版本**：原 battery_policy 把所有运行固定在 env_seed=1，而该布局恰是离群值（见 P1 标定文档 §1.1），因此其置信区间只覆盖协议随机性、**不含布局方差**。这里同时变化布局与协议种子，给出可如实报告的敏感度区间。",
+  "base": "skyfleet/scenarios/battery_limit.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "on_battery_empty": [
+      "none",
+      "land",
+      "crash"
+    ],
+    "env_seed": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  }
+}

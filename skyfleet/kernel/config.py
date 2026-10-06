@@ -152,6 +152,19 @@ class SimConfig:
     airframe: str = "px4_sihsim_quadx"
     #: 载荷（含投递物），kg
     payload_kg: float = 0.0
+    #: 电台发射功率 W。physical 模型据此算发送能耗；[假设] 100 mW 射频
+    #: 输出、功放效率约 30%。linear 模型不使用（沿用 energy_tx_per_bit）。
+    tx_power_w: float = 0.333
+
+    #: 电量耗尽后的处置。**这是"会不会掉机"的答案所在**：
+    #:   none  —— 无任何后果（P0/P1 行为，默认）。电量归零后照常飞行、
+    #:            照常发送，因此物理上不可能的任务仍报告 100% 完成率。
+    #:   land  —— 就地迫降：停止移动、不再接受新任务，但仍在网。
+    #:   crash —— 坠机：复用既有失效机制（NODE_LEAVE cause=BATTERY），
+    #:            主节点据此判定失效并重派任务。
+    #: 默认 none 是刻意的：改成 land/crash 会改变所有已发表数字与
+    #: golden digest，那应当是一次有意识的重新基线。
+    on_battery_empty: str = "none"
     #: 电池容量，Wh。physical 模型把瓦特换算成百分比电量的基准。
     #: None 表示采用该机型的典型容量（见 power.AIRFRAMES）——不要用一个
     #: 全局默认值，否则会给 30 g 机型配上 1 kg 机型的电池。

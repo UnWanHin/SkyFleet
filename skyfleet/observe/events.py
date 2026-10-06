@@ -45,6 +45,9 @@ class EventKind(str, enum.Enum):
     ROLE_CHANGE = "ROLE_CHANGE"
     STATUS_CHANGE = "STATUS_CHANGE"
     HEARTBEAT_TX = "HEARTBEAT_TX"
+    #: 电量耗尽。仅在 on_battery_empty != "none" 时产生——默认策略下
+    #: 电量归零没有任何后果，也就没有这个事件。
+    BATTERY_EMPTY = "BATTERY_EMPTY"
     HEARTBEAT_MISS = "HEARTBEAT_MISS"
     MSG_TX = "MSG_TX"
     MSG_RX = "MSG_RX"

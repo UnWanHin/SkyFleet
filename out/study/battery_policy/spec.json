@@ -1,0 +1,40 @@
+{
+  "name": "battery_policy",
+  "base": "skyfleet/scenarios/battery_limit.json",
+  "seed": 1,
+  "repeats": 12,
+  "grid": {
+    "on_battery_empty": [
+      "none",
+      "land",
+      "crash"
+    ]
+  },
+  "duration": null,
+  "metrics": [
+    "tasks.completion_rate",
+    "delivery_confirm.success_rate",
+    "latency_ms.Q1.mean",
+    "latency_ms.Q1.p95",
+    "latency_ms.Q2.mean",
+    "latency_ms.Q2.p95",
+    "latency_ms.Q3.mean",
+    "latency_ms.Q3.p95",
+    "loss.control_rate",
+    "loss.data_rate",
+    "drop_reasons.COLLISION",
+    "drop_reasons.OCCLUDED",
+    "heartbeat.delivery_rate",
+    "retransmission.total",
+    "retransmission.expired",
+    "route_switches",
+    "forwarded",
+    "recovery.mean_s",
+    "recovery.recovered",
+    "overhead.total_bytes",
+    "overhead.bytes_per_delivered_task",
+    "energy.min_final"
+  ],
+  "description": "电量耗尽处置对比：none（无后果，P0/P1 行为）vs land（就地迫降）vs crash（坠机，复用失效检测与任务重派）。用于回答「集群通讯会不会掉机」——none 下掉机没有后果，crash 下失效会被主节点察觉并触发重派，构成完整闭环。 注意：land 策略初步呈**双峰**（取决于随机种子是否真的触发耗尽），3 次重复的置信区间比均值还宽，故提高到 12 次重复刻画。",
+  "run_count": 36
+}

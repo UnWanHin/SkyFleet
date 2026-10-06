@@ -151,9 +151,11 @@ class Airframe:
 ROTORPY_SRC = "RotorPy 3.0 vehicles/%s_params.py"
 
 AIRFRAMES = [
-    Airframe("Crazyflie", 0.030, 2.3e-08, 2500.0, 0.047,
+    # 半径 0.023 m（桨径约 46 mm）。RotorPy 只声明臂长 d=0.043，未声明
+    # rotor_radius；早前把桨**直径**当半径（0.047）导致盘面积大 4 倍。
+    Airframe("Crazyflie", 0.030, 2.3e-08, 2500.0, 0.023,
              ROTORPY_SRC % "crazyflie"),
-    Airframe("Crazyflie BL", 0.044, 4.052e-08, 3100.0, 0.047,
+    Airframe("Crazyflie BL", 0.044, 4.052e-08, 3100.0, 0.023,
              ROTORPY_SRC % "crazyfliebrushless"),
     Airframe("Hummingbird", 0.500, 5.57e-06, 1500.0, 0.100,
              ROTORPY_SRC % "hummingbird"),

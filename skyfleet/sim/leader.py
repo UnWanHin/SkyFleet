@@ -22,7 +22,8 @@ class LeaderController:
     def __init__(self, config: SimConfig, board: TaskBoard,
                  members: MembershipView, agent: NodeAgent,
                  identity: IdentityRegistry, log: Any,
-                 busy_nodes: frozenset[str] = frozenset()) -> None:
+                 busy_nodes: frozenset[str] = frozenset(),
+                 grounded_nodes: set[str] | None = None) -> None:
         self.config = config
         self.board = board
         self.members = members
@@ -33,6 +34,10 @@ class LeaderController:
         #: 让它去送货，它就会离开站位、飞进楼群低空，既不再提供中继覆盖，
         #: 又把自己变成最容易被遮挡的节点——中继的价值恰好被抹掉。
         self.busy_nodes = busy_nodes
+        #: 已迫降/坠机、不可再承担配送任务的节点。由引擎持有并原地更新，
+        #: 因此这里保存的是**同一个可变集合**而不是副本。
+        self.grounded_nodes = (grounded_nodes if grounded_nodes is not None
+                               else set())
         self.mission_version = 0
         #: task_id -> node_id
         self.assignments: dict[str, str] = {}
@@ -73,7 +78,9 @@ class LeaderController:
         中继被排除在外：它承担的是转发，不是配送。详见 busy_nodes 的说明。
         """
         return [n for n in self.members.available(self.config.min_energy_for_task)
-                if n != self.config.leader_id and n not in self.busy_nodes]
+                if n != self.config.leader_id
+                and n not in self.busy_nodes
+                and n not in self.grounded_nodes]
 
     def assign_pending(self, t: float) -> int:
         """把 CREATED / REASSIGNED 的任务轮流分配给可用成员。"""

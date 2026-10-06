@@ -321,7 +321,8 @@ P1 新增 `AdversaryInjector`，把四类注入消息**经正常接收路径**�
 ```bash
 # 全部标定实验（约 12 分钟，6 进程并行）
 for s in slot_duration access_jitter telemetry_period heartbeat_period \
-         relay_threshold_clean relay_threshold_stress link_model scale env_seed; do
+         relay_threshold relay_threshold_stress link_model scale env_seed \
+         energy_model airframe battery_policy battery_policy_layout; do
   python3 -m skyfleet study --spec skyfleet/study/specs/$s.json --jobs 6 --quiet
 done
 
@@ -340,8 +341,12 @@ python3 -m unittest discover -s tests -t .
 | 接入抖动 | `skyfleet/study/specs/access_jitter.json` | `out/study/access_jitter/runs.csv` |
 | 遥测周期 | `skyfleet/study/specs/telemetry_period.json` | `out/study/telemetry_period/runs.csv` |
 | 心跳周期 | `skyfleet/study/specs/heartbeat_period.json` | `out/study/heartbeat_period/runs.csv` |
-| 中继门限（干净） | `skyfleet/study/specs/relay_threshold_clean.json` | `out/study/relay_threshold_clean/runs.csv` |
+| 中继门限（干净） | `skyfleet/study/specs/relay_threshold.json` | `out/study/relay_threshold/runs.csv` |
 | 中继门限（压力） | `skyfleet/study/specs/relay_threshold_stress.json` | `out/study/relay_threshold_stress/runs.csv` |
 | 链路模型 | `skyfleet/study/specs/link_model.json` | `out/study/link_model/runs.csv` |
 | 规模扩展 | `skyfleet/study/specs/scale.json` | `out/study/scale/runs.csv` |
 | 布局敏感性 | `skyfleet/study/specs/env_seed.json` | `out/study/env_seed/runs.csv` |
+| 能量模型 | `skyfleet/study/specs/energy_model.json` | `out/study/energy_model/runs.csv` |
+| 机型对比 | `skyfleet/study/specs/airframe.json` | `out/study/airframe/runs.csv` |
+| 电池耗尽处置（单一布局） | `skyfleet/study/specs/battery_policy.json` | `out/study/battery_policy/runs.csv` |
+| 电池耗尽处置（含布局） | `skyfleet/study/specs/battery_policy_layout.json` | `out/study/battery_policy_layout/runs.csv` |

@@ -1,0 +1,14 @@
+{
+  "name": "battery_policy",
+  "description": "电量耗尽处置对比：none（无后果）vs land（就地迫降）vs crash（坠机）。**本 spec 固定 env_seed=1，置信区间只覆盖协议随机性、不含布局方差，且 env_seed=1 是离群布局——结论不可外推。正确版本见 battery_policy_layout.json。** 双峰出现在转发量上（走直连还是经中继），三种策略都是双峰；早前写成「取决于种子是否真的触发耗尽」是错的，实测 energy.min_final 在所有运行中均为 0。",
+  "base": "skyfleet/scenarios/battery_limit.json",
+  "seed": 1,
+  "repeats": 12,
+  "grid": {
+    "on_battery_empty": [
+      "none",
+      "land",
+      "crash"
+    ]
+  }
+}

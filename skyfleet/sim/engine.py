@@ -158,6 +158,24 @@ class Engine:
         self._occluded: dict[str, bool] = {}
         #: node_id -> (动作, 原因)；原因参与变化检测，见 _check_safety
         self._last_safety: dict[str, tuple[SafetyAction, str]] = {}
+        #: 已处理过电量耗尽的节点。用集合去重：耗尽只处置一次，
+        #: 否则每 0.1 s 都会重复写事件、重复坠机。
+        self._empty_batteries: set[str] = set()
+        #: 已就地迫降、不再承担任务的节点（land 策略）
+        self.grounded: set[str] = set()
+        raw_policy = config.on_battery_empty
+        if raw_policy is None:
+            raw_policy = "none"
+        if not isinstance(raw_policy, str):
+            raise ValueError(
+                f"on_battery_empty 必须是字符串，得到 {type(raw_policy).__name__}"
+                f"（{raw_policy!r}）；可选 none / land / crash")
+        policy = raw_policy.lower()
+        if policy not in ("none", "land", "crash"):
+            raise ValueError(
+                f"未知的 on_battery_empty={raw_policy!r}，"
+                f"可选 none / land / crash")
+        self._battery_policy = policy
         self._sample_countdown = 0
 
     # ================= 构建 =================
@@ -188,7 +206,8 @@ class Engine:
         self.leader = LeaderController(
             cfg, self.board, self.agents[cfg.leader_id].membership,
             self.agents[cfg.leader_id], self.identity, None,
-            busy_nodes=frozenset(self.relay_ids))
+            busy_nodes=frozenset(self.relay_ids),
+            grounded_nodes=self.grounded)
 
         self._built = True
         return self
@@ -452,6 +471,8 @@ class Engine:
             mover.step(dt)
             v_h, v_z = _step_velocities(before, agent.node.pos, dt)
             agent.spend_energy(self.energy.energy_for_step(v_h, v_z, dt))
+            if agent.node.energy <= 0.0 and node_id not in self._empty_batteries:
+                self._on_battery_empty(node_id, t)
             # 只有**整条航线走完**才算抵达任务点。航线含巡航转场点，
             # 若把"到达任意一个航点"当成抵达，无人机会在巡航高度上
             # 直接开始投递，永远不下降进入峡谷。
@@ -464,6 +485,37 @@ class Engine:
             self._write_samples(t)
 
         self.scheduler.schedule_at(t + dt, EV_MOTION)
+
+    def _on_battery_empty(self, node_id: str, t: float) -> None:
+        """电量耗尽后的处置。
+
+        默认 `none` 直接返回——P0/P1 就是"归零没有后果"，保持逐位兼容。
+        """
+        assert self.log is not None
+        if self._battery_policy == "none":
+            # **不登记**：none 策略下没有任何处置发生，把它记进
+            # `_empty_batteries` 只会留下一个名不副实的状态。
+            return
+        self._empty_batteries.add(node_id)
+        agent = self.agents[node_id]
+        self.log.write(EventKind.BATTERY_EMPTY, t, node_id=node_id,
+                       policy=self._battery_policy)
+        # 两种策略都要先停住：清空航线即停止移动。随后 _advance_mission
+        # 会因 arrived 而触发，因此必须同时把节点标记为不可用，
+        # 否则它会立刻接到下一个任务、继续飞。
+        mover = self.movers.get(node_id)
+        if mover is not None:
+            mover.set_route([])
+        self.grounded.add(node_id)
+        if self._battery_policy == "crash":
+            agent.alive = False
+            self.log.write(EventKind.NODE_LEAVE, t, node_id=node_id,
+                           cause="BATTERY")
+        # 无论迫降还是坠机，该节点名下的未完成任务都必须作废并进入重派，
+        # 否则 land 会把在途/排队任务**永久搁置**：节点仍然 alive、仍然
+        # 心跳，主节点的成员视图不会转 FAILED，于是任务既完不成也不会
+        # 被判失败，任务完成率会无声地掉下去而没有任何事件解释原因。
+        self._void_tasks_of(node_id, t)
 
     def _write_samples(self, t: float) -> None:
         assert self.log is not None
@@ -489,6 +541,8 @@ class Engine:
 
     def _advance_mission(self, node_id: str, t: float) -> None:
         assert self.log is not None
+        if node_id in self.grounded:
+            return          # 已迫降/坠机：不再推进任何任务
         if node_id in self._awaiting_confirm:
             return                       # 停在投递点，等确认被 ACK
         task_id = self._active_task.get(node_id)
@@ -604,6 +658,19 @@ class Engine:
         t = ev.t
         assert self.log is not None and self.leader is not None
         agent = self.agents[cfg.leader_id]
+        if not agent.alive:
+            # 死掉的主节点必须立刻停止指挥，且**不再续排**。
+            #
+            # 这个回调绑定在引擎上，不看 agent.alive；而 _on_rx 对已死节点
+            # 提前返回，于是死主节点的成员视图会**冻结**在死亡时刻，接着
+            # 把仍然活着的成员逐个判成 FAILED 并重派它们的任务——那些事件
+            # 在信道上从未发生过（主节点死后 MSG_TX 恒为 0），却会污染任务
+            # 完成率与路由切换次数。
+            #
+            # 注意：这里只是**停止**，本模拟器没有主节点故障切换。
+            # 主节点一旦失效，整个集群就失去任务编排能力——这是已知限制，
+            # 不是"已经处理好了"。见设计文档的 P2 候选。
+            return
         members = [n for n in agent.membership.members()
                    if n != cfg.leader_id]
 
@@ -631,6 +698,29 @@ class Engine:
         self._check_safety(t)
 
         self.scheduler.schedule_at(t + cfg.heartbeat_period, EV_LEADER_CHECK)
+
+    def _void_tasks_of(self, node_id: str, t: float) -> None:
+        """把某节点名下的未完成任务作废并交给主节点重派。
+
+        迫降与坠机共用：两者的共同点是"这个节点再也送不了货了"，
+        区别只在它是否还在网。
+        """
+        assert self.leader is not None and self.log is not None
+        before = dict(self.leader.assignments)
+        count = self.leader.on_member_failed(node_id, t)
+        if not count:
+            return
+        affected = {tid for tid, n in before.items() if n == node_id}
+        self._node_task_queue.pop(node_id, None)
+        active = self._active_task.pop(node_id, None)
+        if active is not None:
+            affected.add(active)
+        self._task_leg.pop(node_id, None)
+        self._awaiting_confirm.pop(node_id, None)
+        self._known_tasks -= affected
+        mover = self.movers.get(node_id)
+        if mover is not None:
+            mover.set_route([])
 
     def _handle_failed_member(self, node_id: str, t: float) -> None:
         assert self.leader is not None and self.log is not None
@@ -722,7 +812,8 @@ class Engine:
         attempt = self.channel.attempt(msg.msg_id, sender.node.node_id,
                                        sender.node.pos, next_hop, target.pos,
                                        t, quality, msg.size_bits)
-        sender.spend_energy(self.config.energy_tx_per_bit * msg.size_bits)
+        sender.spend_energy(
+            self.energy.tx_energy_per_bit() * msg.size_bits)
         self._tx_index[attempt.tx_id] = _Tx(
             msg=msg, sender=sender, attempt=attempt, quality=quality,
             next_hop=next_hop, broadcast=broadcast)
@@ -943,6 +1034,15 @@ class Engine:
         if agent is None or agent.alive:
             return
         agent.alive = True
+        # 若这个节点是因电量耗尽而坠机的，复活前必须先"换电池"。
+        # 否则它带着 0 电量复飞，而 _empty_batteries 已去重、不会再触发
+        # 耗尽——"电量没有后果"这个刚修掉的缺陷会从另一扇门溜回来。
+        # 只在非 none 策略下生效：none 策略的既有行为是"归零无后果"，
+        # 动它会改变所有已发表数字。
+        if self._battery_policy != "none" and node_id in self._empty_batteries:
+            agent.node.energy = self.config.initial_energy
+            self._empty_batteries.discard(node_id)
+            self.grounded.discard(node_id)
         agent.session_id = self.identity.join(node_id, ev.t)
         agent.leader_epoch = self.agents[self.config.leader_id].leader_epoch
         # 重新入网必须让主节点接受新会话，否则此后该节点的消息全被挡在
