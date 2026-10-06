@@ -13,3 +13,6 @@ out/replay/*.html
 # 它们可由 `study --spec` 完整重建，且 csv 汇总已含全部指标，
 # 因此只入库 spec.json / runs.csv / summary.md 三样。
 out/study/**/logs/
+
+# 临时草稿目录（探针、一次性转换、图表试作），不是产物
+.build/
