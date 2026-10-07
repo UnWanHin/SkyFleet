@@ -15,7 +15,6 @@ from skyfleet.world.power import (
     AIRFRAMES,
     DEFAULT_CD_A_COEFF,
     LEGACY_TX_PER_BIT,
-    DEFAULT_DESCENT_FLOOR,
     G,
     RHO,
     Airframe,
@@ -684,6 +683,89 @@ class TestAirframeImmutability(unittest.TestCase):
         af = Airframe("custom", 2.0, 1e-5, 900.0, 0.15)
         m = PhysicalEnergyModel(af)
         self.assertGreater(m.hover_power_w(), 0.0)
+
+
+class TestVortexRingStateIsQuantified(unittest.TestCase):
+    """★ 跳线测试：把「涡环状态未建模」从模糊限制变成可执行触发条件。
+
+    涡环状态（VRS，大致 `-2*v_hov < v_z < -0.5*v_hov`）内动量理论失效，
+    且真实功率**高于**悬停，而模型因 `max(p_electric, 0.0)` 在带内给出
+    约 0——偏低。
+
+    实测（PX4 物理模型，600 s 基线）：该带内的能耗只占总飞行能耗的
+    0.0144%。即使极端假设带内真实功率是模型的 3 倍，总能耗误差也只有
+    0.029%，远小于模型本身已知的其他偏差。因此**刻意不实现**涡环建模：
+    要有意义地实现它需要随下降率变化的经验公式，而本场景不覆盖该工况，
+    无从标定——顺手发明物理正是本项目反复避免的错误。
+
+    本测试的作用是**触发条件**：若将来有人调整下降速度、航点结构或机型，
+    使涡环带能耗占比越过阈值，它会失败并提示「此处必须实现涡环建模」。
+    在此之前，「已知限制」是零风险的。
+    """
+
+    #: 占比上限。实测 0.0144%，留约 7 倍余裕，避免因无关的数值微调而
+    #: 误报；但一旦工况真的改变（例如下降速度降到涡环带内），必然触发。
+    MAX_BAND_ENERGY_SHARE = 0.001     # 0.1%
+
+    def _band(self) -> tuple[float, float]:
+        af = AIRFRAMES["px4_sihsim_quadx"]
+        v_hov = math.sqrt(af.hover_thrust_n(0.0) / (2.0 * RHO * af.disk_area_total))
+        return -2.0 * v_hov, -0.5 * v_hov
+
+    def test_vortex_ring_band_is_negligible_in_the_baseline(self):
+        from dataclasses import replace
+        from pathlib import Path
+        import tempfile
+
+        from skyfleet.kernel.config import load_config
+        from skyfleet.sim.engine import Engine
+        from skyfleet.world.power import PhysicalEnergyModel
+
+        lo, hi = self._band()
+        samples: list[tuple[float, float]] = []
+        original = PhysicalEnergyModel.energy_for_step
+
+        def spy(model, v_h, v_z, dt):
+            energy = original(model, v_h, v_z, dt)
+            samples.append((energy, v_z))
+            return energy
+
+        PhysicalEnergyModel.energy_for_step = spy
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = replace(load_config(Path("skyfleet/scenarios/baseline_small.json")),
+                              log_path=str(Path(tmp) / "vrs.jsonl"),
+                              energy_model="physical",
+                              airframe="px4_sihsim_quadx")
+                Engine(cfg).run()
+        finally:
+            PhysicalEnergyModel.energy_for_step = original
+
+        self.assertGreater(len(samples), 1000, "取样太少，测试会空转")
+        total = sum(e for e, _ in samples)
+        self.assertGreater(total, 0.0, "总能耗为 0，前提不成立")
+        in_band = [e for e, v_z in samples if lo < v_z < hi]
+        share = sum(in_band) / total
+        self.assertLess(
+            share, self.MAX_BAND_ENERGY_SHARE,
+            f"涡环带内能耗占比 {share:.6%} 超过阈值 "
+            f"{self.MAX_BAND_ENERGY_SHARE:.2%}（带 {lo:.2f}..{hi:.2f} m/s，"
+            f"{len(in_band)} 个取样点）。\n"
+            f"这说明工况已改变，**必须实现涡环建模**——"
+            f"见分析文档 §13。")
+
+    def test_the_band_is_still_entered_at_all(self):
+        """反向上界：确认带确实会被进入。
+
+        若这条失败，说明场景**完全**不经过涡环带（例如下降速度全部
+        在带外），那么「不建模」的决定更加没有风险——但这也是一个
+        应当被知道的事实变化，所以一并钉住。
+        """
+        lo, hi = self._band()
+        self.assertLess(lo, hi)
+        # PX4 的带约为 -9.03 .. -2.26 m/s
+        self.assertAlmostEqual(lo, -9.03, delta=0.1)
+        self.assertAlmostEqual(hi, -2.26, delta=0.1)
 
 
 if __name__ == "__main__":
