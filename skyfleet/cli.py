@@ -200,9 +200,16 @@ def main(argv: list[str] | None = None) -> int:
         root = (exc.name or "").split(".")[0]
         if root not in OPTIONAL_DEPENDENCIES:
             raise
-        print(f"错误：缺少可选依赖 {exc.name}。\n"
-              f"      画图与回放需要 matplotlib："
-              f"python3 -m pip install matplotlib", file=sys.stderr)
+        # 措辞必须与事实一致：只有**绘图**需要 matplotlib。回放 HTML 是
+        # 纯 json + pathlib 生成的（`viz/replay_html.py` 不 import 它），
+        # 而旧消息说「画图与回放需要 matplotlib」会让缺依赖的用户以为
+        # 回放也用不了，从而放弃本可正常使用的功能。
+        # 实测：强制封锁 matplotlib 后回放仍能正常产出 HTML。
+        print(f"错误：缺少可选依赖 {exc.name}（当前命令：{args.command}）。\n"
+              f"      只有**绘图**需要 matplotlib；仿真、指标与回放 HTML "
+              f"不依赖它。\n"
+              f"      如需绘图请安装：python3 -m pip install matplotlib",
+              file=sys.stderr)
         return 1
 
 
