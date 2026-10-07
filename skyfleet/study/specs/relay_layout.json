@@ -1,0 +1,22 @@
+{
+  "name": "relay_layout",
+  "description": "中继布点可比较性：ring / grid / farthest 三种布点，跨 6 个 env_seed。P1 结论「中继门限无可测影响」的根因是布点而非门限——原 ring 布点把中继放在同一半径上，使「够不够得着」近乎全有或全无。本规格只回答「三种布点是否产生可测量的差异」，**不**回答哪种更优（那需要先有可比较的布点）。必须跨 env_seed：单布局方差可解释约 94% 的完成率方差，固定在单一布局上比较必然误判。",
+  "base": "skyfleet/scenarios/baseline_small.json",
+  "seed": 1,
+  "repeats": 3,
+  "grid": {
+    "relay_layout": [
+      "ring",
+      "grid",
+      "farthest"
+    ],
+    "env_seed": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  }
+}

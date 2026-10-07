@@ -113,6 +113,74 @@ class _Rx:
     attempt: Any
 
 
+#: 规格 §3.2 规定的三种中继布点。
+#:
+#: - `ring`：内环 + 高高度。历史行为，**默认**，逐位不变。
+#: - `grid`：按 ceil(sqrt(n)) 均布于任务域。用来检验「环」带来的
+#:   旋转对称性是否掩盖了协议效应。
+#: - `farthest`：贪心最远点。作为可达性**上界参考**，不是实用方案。
+RELAY_LAYOUTS = frozenset({"ring", "grid", "farthest"})
+
+#: `farthest` 贪心用的候选格边长。候选越密，贪心解越接近真正的最远点，
+#: 但代价是 O(candidates x chosen)。9 已足够——中继数量是个位数。
+_FARTHEST_CANDIDATE_GRID = 9
+
+
+def _relay_base_positions(layout: str, area: float,
+                          indices: list[int], total: int
+                          ) -> list[tuple[float, float]]:
+    """按布点给出各中继的**基准**坐标（不含抖动）。
+
+    `indices` 是中继在全体节点中的全局序号，`total` 是全体节点数。
+    `ring` 必须用这两个值复现历史公式——用「中继自身序号」均分所得
+    角度与历史不同，会直接改变仿真结果（实测 golden digest 因此变化）：
+    8 从机 + 2 中继时，全局公式给出 288° 与 324°，自身序号给出 0° 与
+    180°，是完全不同的布点。
+    """
+    count = len(indices)
+    if count <= 0:
+        return []
+    if layout == "ring":
+        # 内环：与主节点同心，半径 0.18 x area。**逐字保留**历史公式。
+        radius = area * 0.18
+        return [(area / 2 + radius * math.cos(2.0 * math.pi * index / total),
+                 area / 2 + radius * math.sin(2.0 * math.pi * index / total))
+                for index in indices]
+    if layout == "grid":
+        # 把中继均布在任务域上（留出 20% 边距，避免贴边）。列数取
+        # ceil(sqrt(n))，使网格尽量接近正方形。
+        cols = math.ceil(math.sqrt(count))
+        rows = math.ceil(count / cols)
+        margin = area * 0.2
+        span = area - 2.0 * margin
+        out: list[tuple[float, float]] = []
+        for i in range(count):
+            r, c = divmod(i, cols)
+            x = margin + (span * (c + 0.5) / cols if cols else area / 2)
+            y = margin + (span * (r + 0.5) / rows if rows else area / 2)
+            out.append((x, y))
+        return out
+    if layout == "farthest":
+        # 贪心最远点：每次选距「已选点集 + 主节点」最近距离最大的候选。
+        # 起点放入主节点位置，使第一个中继就落在离主节点最远处。
+        center = (area / 2, area / 2)
+        grid = _FARTHEST_CANDIDATE_GRID
+        candidates = [(area * (i + 0.5) / grid, area * (j + 0.5) / grid)
+                      for i in range(grid) for j in range(grid)]
+        chosen: list[tuple[float, float]] = []
+        for _ in range(count):
+            best, best_d = None, -1.0
+            for point in candidates:
+                d = min([math.dist(point, center)]
+                        + [math.dist(point, p) for p in chosen])
+                if d > best_d:
+                    best, best_d = point, d
+            assert best is not None
+            chosen.append(best)
+        return chosen
+    raise ValueError(f"未知 relay_layout: {layout!r}")
+
+
 class Engine:
     def __init__(self, config: SimConfig) -> None:
         self.config = config
@@ -238,23 +306,40 @@ class Engine:
             cfg.leader_id, Role.LEADER, (area / 2, area / 2, high),
             speed=0.0, energy=cfg.initial_energy)
 
+        if cfg.relay_layout not in RELAY_LAYOUTS:
+            # 未知布点必须报错。静默退回默认会让拼错的整轮扫参结论
+            # 全部是假的——配置层对未知字段一律报错也是同一个理由。
+            raise ValueError(
+                f"未知 relay_layout: {cfg.relay_layout!r}，"
+                f"可选 {sorted(RELAY_LAYOUTS)}")
+
         ids = ([f"S{i + 1}" for i in range(cfg.slaves)]
                + [f"R{i + 1}" for i in range(cfg.relays)])
+        # 中继的基准坐标按布点预先算好。**只改基准，不改随机数消耗顺序**：
+        # 三种布点仍然为每个节点抽同样次数的抖动，这样同一 env_seed 下
+        # 三者的从节点抖动完全一致，比较才只反映「布点」这一个变量。
+        relay_indices = [i for i, nid in enumerate(ids)
+                         if nid.startswith("R")]
+        relay_base = _relay_base_positions(
+            cfg.relay_layout, area, relay_indices, len(ids))
+        relay_index = 0
         for index, node_id in enumerate(ids):
             role = Role.SLAVE if node_id.startswith("S") else Role.RELAY
-            # 中继放在更靠近主节点的内圈，并且一律在高空。
-            # 若把中继和从节点摆在同一个外圈、同一个高度带，两者看到的
+            # 中继一律在高空。若把中继和从节点摆在同一个高度带，两者看到的
             # 遮挡几乎一样——中继对任何一条链路都不会更好，于是永远
             # 不会被选中，中继转发这条路径实际上形同虚设。
             if role is Role.RELAY:
-                radius = area * 0.18
+                bx, by = relay_base[relay_index]
+                relay_index += 1
                 z = high
             else:
+                angle = 2.0 * math.pi * index / len(ids)
                 radius = area * 0.35
+                bx = area / 2 + radius * math.cos(angle)
+                by = area / 2 + radius * math.sin(angle)
                 z = rng.uniform(low, high)
-            angle = 2.0 * math.pi * index / len(ids)
-            x = area / 2 + radius * math.cos(angle) + rng.uniform(-15.0, 15.0)
-            y = area / 2 + radius * math.sin(angle) + rng.uniform(-15.0, 15.0)
+            x = bx + rng.uniform(-15.0, 15.0)
+            y = by + rng.uniform(-15.0, 15.0)
             self.nodes[node_id] = Node(
                 node_id, role,
                 (min(max(x, 0.0), area), min(max(y, 0.0), area), z),

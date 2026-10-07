@@ -138,7 +138,7 @@ docs/superpowers/
 
 ```bash
 python3 -m unittest discover -s tests -t .            # 系统 Python，跳过 5 个画图测试
-.venv/bin/python -m unittest discover -s tests -t .   # 含可视化，630 passed
+.venv/bin/python -m unittest discover -s tests -t .   # 含可视化，654 passed
 ```
 
 **确定性是第一验收项**：同一 `master_seed` 连续两次运行，规范化日志的

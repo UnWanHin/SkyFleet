@@ -45,6 +45,13 @@ class SimConfig:
     leader_id: str = "L"
     slaves: int = 8
     relays: int = 2
+    #: 中继布点方式。取值见 `skyfleet.sim.engine.RELAY_LAYOUTS`。
+    #:
+    #: 存在的理由是 P1 的失败教训：扫参发现「中继门限无可测影响」，根因
+    #: 不是门限而是**布点**——原布点把中继放在同一半径上，使「够不够得着」
+    #: 近乎全有或全无，门限因此调不动。没有可比较的布点，任何「优化」都
+    #: 不可验证。默认 `ring` 保持历史行为逐位不变。
+    relay_layout: str = "ring"
     tasks: int = 20
     initial_energy: float = 100.0
     min_energy_for_task: float = 20.0
