@@ -214,6 +214,20 @@ class Engine:
         self.leader_id: str = config.leader_id
         #: 最近一次听到主节点心跳的时刻（引擎视角，用于判失联）。
         self._last_leader_beat: float = 0.0
+
+        # ---- 本地安全动作的致动状态（P3）----
+        #: node_id -> 进入安全状态前保存的航线。
+        #:
+        #: 必须保存而不是「等条件消失后由任务逻辑重设」：`_advance_mission`
+        #: 只在**到达航点**时被推进，航线一清空就再也不会被调用，节点会
+        #: 永久悬停、任务卡死。恢复必须由这里负责。
+        self._safety_saved_route: dict[str, list[Any]] = {}
+        #: node_id -> 上一次**已致动**的动作。与 `_last_safety`（记录用）
+        #: 分开：记录阈值是 2 个心跳周期，致动阈值是 10 个——「值得记录」
+        #: 与「值得据此改变飞行」不是同一件事。
+        self._last_actuated: dict[str, SafetyAction] = {}
+        #: node_id -> 起飞点。`RETURN` 的返航目标。
+        self._home: dict[str, Any] = {}
         self._kills: list[tuple[str, float]] = []
         self._revives: list[tuple[str, float]] = []
         self._tx_index: dict[int, _Tx] = {}
@@ -269,6 +283,8 @@ class Engine:
         self.adversary = AdversaryInjector.from_config(cfg)
 
         self._place_nodes()
+        # 记下起飞点作为 `RETURN` 的返航目标。必须在放置之后、任何飞行之前。
+        self._home = {nid: node.pos for nid, node in self.nodes.items()}
 
         for node in self.nodes.values():
             agent = NodeAgent(node, cfg, self.identity, self.rngs, None, self)
@@ -424,6 +440,11 @@ class Engine:
             agent = self.agents[node_id]
             agent.view.sessions.add(leader_agent.session_id)
             agent.last_heard[cfg.leader_id] = 0.0
+            # 中继同样预置：否则开局时中继是"从未听到"，而 §7.4 的失联
+            # 判据要求"主节点**及所有中继**"都失联——未预置会让每个节点
+            # 在 t=0 就被判失联，触发一整轮虚假的安全动作。
+            for relay_id in self.relay_ids:
+                agent.last_heard.setdefault(relay_id, 0.0)
             leader_agent.membership.on_join(node_id, session, 0.0)
             leader_agent.membership.set_energy(node_id, cfg.initial_energy)
             self._node_task_queue[node_id] = []
@@ -515,6 +536,15 @@ class Engine:
     #: 必须 > 1.5（主节点自己判成员丢失用的阈值），否则正常时钟漂移
     #: 就会触发一次选举；又要足够小，否则集群空转太久。
     ELECTION_TIMEOUT_FACTOR = 3.0
+
+    #: 记录 `SAFETY_ACTION` 的阈值（心跳周期的倍数）。任何降级都留痕，
+    #: 便于复盘。
+    SAFETY_RECORD_TIMEOUT_FACTOR = 2.0
+
+    #: **致动**的阈值。见 §2：记录用 2 个周期、致动用 10 个。
+    #: 基线实测最长失联 5s（5 个周期），故 10 个周期保证基线不触发致动，
+    #: 而持续失联（如杀掉主节点与全部中继）必定触发。
+    SAFETY_ACT_TIMEOUT_FACTOR = 10.0
 
     def _maybe_elect(self, t: float) -> None:
         """主节点失联时选举新主节点。
@@ -940,11 +970,9 @@ class Engine:
         for node_id, agent in self.agents.items():
             if node_id == self.leader_id or not agent.alive:
                 continue
-            leader_seen = agent.last_heard.get(self.leader_id)
             status = agent.position.report(agent.node, t)
             fence = geofence_breach(agent.node.pos, self.geofences)
-            link_lost = (leader_seen is None
-                         or t - leader_seen > 2.0 * cfg.heartbeat_period)
+            link_lost = self._upstream_lost(agent, t)
             low_battery = agent.energy_is_low()
             stale = status.stale
             # 原因也要参与变化检测：只比较动作时，"已经在悬停、随后 GNSS
@@ -957,12 +985,83 @@ class Engine:
                 leader_lost=link_lost, low_battery=low_battery,
                 position_stale=stale, geofence=fence is not None,
             )
-            if self._last_safety.get(node_id) != (action, cause):
+            # 致动：把决策真正接到飞行上。已迫降/坠机的节点不碰——
+            # 它们的航线由耗尽策略管理，安全动作插手会互相打架。
+            #
+            # **用另一套阈值重算动作**，不能复用上面的 `action`：那个用
+            # 的是 2 个心跳周期的记录阈值，直接拿它致动会让普通丢包
+            # （基线实测 1~5s）把节点停在半路。低电量/位置过期/禁飞区
+            # 是**电平**条件而非时间窗，两个阈值下取值相同。
+            act_action = safety_decision(
+                leader_lost=self._upstream_lost(
+                    agent, t, self.SAFETY_ACT_TIMEOUT_FACTOR),
+                low_battery=low_battery, position_stale=stale,
+                geofence=fence is not None)
+            actuated = False
+            if node_id not in self.grounded:
+                actuated = self._actuate_safety(node_id, act_action)
+            if (self._last_safety.get(node_id) != (action, cause)
+                    or actuated):
                 self._last_safety[node_id] = (action, cause)
                 self.log.write(EventKind.SAFETY_ACTION, t, node_id=node_id,
                                action=action.value, cause=cause,
                                geofence=fence,
-                               position_age=round(status.age_s, 6))
+                               position_age=round(status.age_s, 6),
+                               actuated=actuated)
+
+    def _upstream_lost(self, agent: NodeAgent, t: float,
+                       factor: float | None = None) -> bool:
+        """判「与主节点及所有中继失联」（设计文档 §7.4）。
+
+        判据是「及**所有**中继」，不是「或」：只要还有任何一个上游可达，
+        节点就仍能上报与接收指令，不该判定为失联。
+
+        原实现只检查主节点。实测证据：基线 t=332.0 **全部 10 个节点
+        同时**报 LINK_LOST，而当时中继完全可达，主节点心跳也一直规律
+        （600 次、无 >1.5s 间隔）——只是 t=329.47→332.45 之间有一次
+        3 秒的接收空窗（普通丢包）。
+        """
+        if factor is None:
+            factor = self.SAFETY_RECORD_TIMEOUT_FACTOR
+        timeout = factor * self.config.heartbeat_period
+        for upstream_id in (self.leader_id, *self.relay_ids):
+            seen = agent.last_heard.get(upstream_id)
+            if seen is None or t - seen > timeout:
+                continue
+            return False           # 还有可达的上游
+        return True
+
+    def _actuate_safety(self, node_id: str, action: SafetyAction) -> bool:
+        """把安全动作接到飞行上。返回本次是否**实际改变了航线**。
+
+        阈值刻意比记录用的更保守：基线里 22 次 LINK_LOST **全部是暂态**
+        （1~5s 即恢复）。若用记录的 2 个心跳周期去致动，节点会在普通
+        丢包时反复停飞 1~5 秒——对配送无人机而言，短暂失去上行链路就
+        停在半路，比继续飞更糟。
+        """
+        previous = self._last_actuated.get(node_id, SafetyAction.NONE)
+        if action is previous:
+            return False
+        mover = self.movers[node_id]
+        if action is SafetyAction.NONE:
+            self._last_actuated[node_id] = SafetyAction.NONE
+            saved = self._safety_saved_route.pop(node_id, None)
+            if saved:
+                mover.set_route(list(saved))     # 副本，不共享别名
+                return True
+            return False
+        # 首次进入安全状态时保存航线；在安全状态之间切换不覆盖，
+        # 否则 HOVER -> RETURN 会把"进入安全状态前的航线"丢掉。
+        if previous is SafetyAction.NONE:
+            self._safety_saved_route[node_id] = list(mover.route)
+        self._last_actuated[node_id] = action
+        if action is SafetyAction.RETURN:
+            home = self._home.get(node_id)
+            mover.set_route([home] if home is not None else [])
+        else:
+            # HOVER / HOLD / DESCEND：停在原地。
+            mover.set_route([])
+        return True
 
     def _log_status(self, node_id: str, before: Any, after: Any,
                     t: float) -> None:

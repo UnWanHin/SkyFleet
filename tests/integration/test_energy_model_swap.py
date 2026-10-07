@@ -527,10 +527,25 @@ class TestBatteryExhaustionPolicy(unittest.TestCase):
         self.assertEqual(first["old_leader"], "L")
         self.assertGreaterEqual(first["t"], death, "宣告早于主节点死亡")
 
-        # 3) 接任之后任务必须继续被编排——这才是"有接管者"的实证。
-        after = [e for e in events if e["t"] > first["t"]
-                 and e["kind"] in ("TASK_ASSIGN", "TASK_REASSIGN")]
-        self.assertTrue(after, "接管之后没有任何任务编排")
+        # 3) 接管者必须**真的在行使主节点职责**。
+        #
+        # 原先这里断言"接任之后必须有 TASK_ASSIGN"，那是**脆弱断言**：
+        # 本场景 60 个任务在 t≈0 就全部指派完毕，接任发生在 485s，
+        # 此时已交付 59 个——"死后再有指派"本就不可达。它此前能通过，
+        # 只是因为当时有较多任务失败被重派；行为改善后反而变红。
+        #
+        # 正确的证据是"新主节点在持续广播心跳"（主节点职责的载体），
+        # 而"接任后任务继续被编排"由下面
+        # test_a_single_failure_causes_exactly_one_election 覆盖，
+        # 那里任务确实会在接任后继续被指派。
+        beats = [e for e in events
+                 if e["kind"] == "HEARTBEAT_TX"
+                 and e["node_id"] == first["node_id"]
+                 and e["t"] > first["t"]]
+        self.assertTrue(
+            beats,
+            f"{first['node_id']} 宣布接任后没有再广播心跳——它没有真正"
+            f"承担主节点职责")
 
     def test_cascading_failover_when_leaders_themselves_die(self):
         """★ 续航受限场景下的**串联故障切换**，是一处真实行为而非缺陷。
@@ -611,6 +626,15 @@ class TestBatteryExhaustionPolicy(unittest.TestCase):
         self.assertEqual(len(announces), 1,
                          f"单次故障产生了 {len(announces)} 次选举（选举风暴）")
         self.assertEqual(announces[0]["leader_epoch"], 1)
+
+        # ★ 接任之后任务**必须继续被编排**——这是"有接管者"的实证，
+        #   也是规格 §4 对切片 B 的验收条款。本场景（20 任务、主节点在
+        #   20s 被杀）在接任后仍有任务需要指派/重派，实测 6 笔。
+        after = [e for e in events if e["t"] > announces[0]["t"]
+                 and e["kind"] in ("TASK_ASSIGN", "TASK_REASSIGN")]
+        self.assertTrue(
+            after,
+            "接任之后没有任何任务编排——接管者没有真正接手编排")
 
     def test_no_fault_means_no_election(self):
         """无故障场景**不得**产生任何选举事件。

@@ -37,7 +37,22 @@ from skyfleet.sim.engine import Engine
 #: - 2026-10-04 P1 接收端有效期校验：TASK_ASSIGN / TASK_REASSIGN 在投递时
 #:   若已过 deadline 判 DEADLINE_MISSED。基线场景该分支命中 0 次，
 #:   各项指标与丢弃原因分布完全未变；它是为对抗注入准备的防线。
-GOLDEN = "aff4a602142b20c55fec107a7ebb1e7b8f115e4505490576c70254f4b259a854"
+#: - 2026-10-08 P2 切片 A/B/C 与 P3（安全动作致动）：SAFETY_ACTION 增加
+#:   `actuated` 字段（P3）；切片 A 新增 DropReason.SEQ_OUT_OF_WINDOW、
+#:   B 新增 EventKind.LEADER_ANNOUNCE、C 新增 config.relay_layout。
+#:   三者都**不改变无故障基线路径**：切片 B 的选举只在主节点失效时触发，
+#:   切片 A 的分流序号不改变任何接收/拒绝判定（曾用 W=64 一度打破，
+#:   根因是发送端全局计数，改为按消息类型分流后复原），切片 C 的
+#:   `ring` 是默认且逐字保留历史公式。
+#:
+#:   P3 的验证方式值得记下：逐事件对比改动前后（56588 个事件），**只有
+#:   54 个 SAFETY_ACTION 各多一个 `actuated: false`，其余 56534 个逐字节
+#:   相同，没有任何字段的值变化**。所有指标逐项一致，安全动作分布也
+#:   相同（NONE 32 / HOVER 22）。原因是设计使然——基线最长失联 5s
+#:   小于 10s 的致动阈值，基线因此不触发任何致动，行为改变只出现在
+#:   持续失联的场景。故本次属「仅日志内容增加」，**报告中已有的数字
+#:   不需要复核**。
+GOLDEN = "712a9686143b6ecc260e989fda0af8c328fe5b22ad9c6d5abdb5dc968c2fd581"
 
 
 class TestGoldenDigest(unittest.TestCase):
