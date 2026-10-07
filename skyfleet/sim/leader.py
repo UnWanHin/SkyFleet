@@ -42,6 +42,16 @@ class LeaderController:
         #: task_id -> node_id
         self.assignments: dict[str, str] = {}
 
+    @property
+    def leader_id(self) -> str:
+        """当前主节点的 node_id。**取自持有的 agent**，而不是 config。
+
+        故障切换后 LeaderController 会被重新绑定到新当选者的 agent 上，
+        若这里仍读 config.leader_id，新主节点发出的任务指派会顶着旧
+        主节点的名字，接收端的会话/任期校验会把它全部挡下。
+        """
+        return self.agent.node.node_id
+
     # ---------- 场景生成 ----------
 
     def create_tasks(self, t: float) -> int:
@@ -78,7 +88,7 @@ class LeaderController:
         中继被排除在外：它承担的是转发，不是配送。详见 busy_nodes 的说明。
         """
         return [n for n in self.members.available(self.config.min_energy_for_task)
-                if n != self.config.leader_id
+                if n != self.leader_id
                 and n not in self.busy_nodes
                 and n not in self.grounded_nodes]
 
@@ -106,7 +116,7 @@ class LeaderController:
     def _assign_msg(self, task, node_id: str, t: float):
         from skyfleet.protocol.message import Msg
         return Msg.new(
-            "TASK_ASSIGN", src=self.config.leader_id, dst=node_id, t=t,
+            "TASK_ASSIGN", src=self.leader_id, dst=node_id, t=t,
             msg_id=self.agent.new_msg_id(),
             seq=self.agent.next_seq("TASK_ASSIGN"),
             session_id=self.agent.session_id,

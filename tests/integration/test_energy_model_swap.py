@@ -482,17 +482,17 @@ class TestBatteryExhaustionPolicy(unittest.TestCase):
                         "基础设施不再最先耗尽，这条限制说明需要重写")
         self.assertLess(metrics["tasks"]["completion_rate"], 1.0)
 
-    def test_a_crashed_leader_stops_orchestrating(self):
-        """★ 坠机的主节点不能继续指挥。
+    def test_a_crashed_leader_stops_and_a_new_one_takes_over(self):
+        """★ 坠机的主节点必须停止，且**有节点接管**。
 
-        `_on_leader_check` 是排程回调，绑定在引擎上而不看 `agent.alive`；
-        而 `_on_rx` 对已死节点提前返回，于是死主节点的成员视图**冻结**，
-        接着把仍然活着的成员一个个判成 FAILED 并重派它们的任务。
-        这些事件在信道上从未发生过——主节点死后 MSG_TX 恒为 0。
+        原缺陷（对抗式审查发现）：`_on_leader_check` 是排程回调，绑定在
+        引擎上而不看 `agent.alive`；而 `_on_rx` 对已死节点提前返回，于是
+        死主节点的成员视图**冻结**，接着把仍然活着的成员一个个判成
+        FAILED 并重派它们的任务。实测（battery_limit + crash）：L 于
+        t=485.1 坠机，之后仍写了 104 条任务/成员管理事件而 MSG_TX = 0。
 
-        实测（battery_limit + crash）：L 于 t=485.1 坠机，之后仍写了
-        104 条任务/成员管理事件（4 次 TASK_REASSIGN）而 MSG_TX = 0。
-        这直接推翻了"主节点据此判定失效并重派任务"的说法。
+        当时只是"让它停"，本模拟器**没有故障切换**——集群会永久失去
+        任务编排能力。P2 切片 B 补上了选举。
         """
         with tempfile.TemporaryDirectory() as tmp:
             cfg = replace(load_config(Path("skyfleet/scenarios/battery_limit.json")),
@@ -507,19 +507,161 @@ class TestBatteryExhaustionPolicy(unittest.TestCase):
         self.assertTrue(deaths, "主节点没有坠机，本测试会空转")
         death = min(deaths)
 
-        # 只有主节点会写这两类事件
-        after = [e for e in events if e["t"] > death
-                 and e["kind"] in ("TASK_ASSIGN", "TASK_REASSIGN")]
-        self.assertEqual(
-            after, [],
-            f"主节点已死 {len(after)} 条任务指派/重派仍被写入："
-            f"{[(e['kind'], e['t']) for e in after]}")
-
-        # 且主节点确实发不出消息——证明上面那些事件不是真的通过信道
+        # 1) 死者闭嘴：主节点死后**它自己**不能再发消息，也不能再署名下令。
         self.assertEqual(
             [e for e in events if e["t"] > death and e["kind"] == "MSG_TX"
              and e["node_id"] == "L"], [],
             "主节点死后仍在发送")
+        from_l = [e for e in events if e["t"] > death
+                  and e["kind"] in ("TASK_ASSIGN", "TASK_REASSIGN")
+                  and e.get("node_id") == "L"]
+        self.assertEqual(from_l, [],
+                         f"死掉的主节点仍以自己的名义下达了 {len(from_l)} 条指令")
+
+        # 2) 生者接任。注意本场景**会**出现多次宣告——见
+        #    test_cascading_failover_when_leaders_themselves_die。
+        announces = [e for e in events if e["kind"] == "LEADER_ANNOUNCE"]
+        self.assertTrue(announces, "主节点死亡后没有任何节点接管")
+        first = announces[0]
+        self.assertNotEqual(first["node_id"], "L", "宣告者仍是已死的主节点")
+        self.assertEqual(first["old_leader"], "L")
+        self.assertGreaterEqual(first["t"], death, "宣告早于主节点死亡")
+
+        # 3) 接任之后任务必须继续被编排——这才是"有接管者"的实证。
+        after = [e for e in events if e["t"] > first["t"]
+                 and e["kind"] in ("TASK_ASSIGN", "TASK_REASSIGN")]
+        self.assertTrue(after, "接管之后没有任何任务编排")
+
+    def test_cascading_failover_when_leaders_themselves_die(self):
+        """★ 续航受限场景下的**串联故障切换**，是一处真实行为而非缺陷。
+
+        在 `battery_limit`（初始电量 45、耗尽即坠机）里，所有节点最终都会
+        耗尽——包括刚上任的主节点。实测时间线：
+
+        | 时刻 | 事件 |
+        |---|---|
+        | 485.1 | L、R1、R2 同时耗尽（它们不飞任务航线，悬停最费电）|
+        | 485.2 | S1 当选（epoch 1）|
+        | 560.7 | **S1 自己也耗尽** |
+        | 560.9 | S2 当选（epoch 2）|
+        | 562.9 | S2 也耗尽 |
+        | 563.0 | S3 当选（epoch 3）|
+
+        这说明两件事，都要写进报告：
+        1. 任期号**单调递增**，选举链是可追溯的；
+        2. 选举次数不是"1"，所以任何断言"恰好一次宣告"的测试在续航受限
+           场景下都是错的——本测试把这个区分固定下来。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = replace(load_config(Path("skyfleet/scenarios/battery_limit.json")),
+                          log_path=str(Path(tmp) / "cascade.jsonl"),
+                          on_battery_empty="crash")
+            Engine(cfg).run()
+            events = list(read_log(cfg.log_path))
+
+        announces = [e for e in events if e["kind"] == "LEADER_ANNOUNCE"]
+        self.assertGreaterEqual(len(announces), 2,
+                                "本场景应出现串联重选，若只有一次说明前提已变")
+        # 任期严格单调递增
+        epochs = [e["leader_epoch"] for e in announces]
+        self.assertEqual(epochs, sorted(set(epochs)),
+                         f"任期号没有严格递增：{epochs}")
+        # 每次当选者与被替代者必须不同，且链条连续
+        for prev, cur in zip(announces, announces[1:]):
+            self.assertEqual(cur["old_leader"], prev["node_id"],
+                             "选举链断了：新宣告的 old_leader 不是上一任")
+        # 当选者不得是已死节点
+        dead_at = {}
+        for e in events:
+            if e["kind"] == "NODE_LEAVE":
+                dead_at.setdefault(e["node_id"], e["t"])
+        for ann in announces:
+            d = dead_at.get(ann["node_id"])
+            self.assertTrue(d is None or ann["t"] < d,
+                            f"{ann['node_id']} 在自己死亡之后当选")
+        # **不是选举风暴**。判据是"有没有换掉一个还活着的主节点"，
+        # 而**不是**"两次宣告间隔多久"——后者是错的：实测 S2 于 560.9
+        # 当选、562.9 就自己耗尽，间隔只有 2.1s，但那次选举完全正当。
+        # 用间隔当判据会把正确的串联切换误报成风暴。
+        for ann in announces[1:]:
+            old_leader = ann["old_leader"]
+            died = dead_at.get(old_leader)
+            self.assertIsNotNone(
+                died,
+                f"{ann['node_id']} 在 {ann['t']:.1f}s 取代了 {old_leader}，"
+                f"但 {old_leader} 从未死亡——这是换掉活主节点的选举风暴")
+            self.assertLessEqual(
+                died, ann["t"] + 1e-9,
+                f"在 {old_leader} 死亡（{died:.1f}s）之前就把它换掉了")
+
+    def test_a_single_failure_causes_exactly_one_election(self):
+        """单次故障必须**恰好**产生一次选举（防选举风暴）。
+
+        与上一个测试互补：续航受限场景里多次宣告是**正确**的（每次都
+        有新的主节点耗尽），而在单次击杀的干净场景里，多于一次就说明
+        有节点在反复重选。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = replace(load_config(SCENARIO),
+                          log_path=str(Path(tmp) / "single.jsonl"),
+                          duration=200.0, kills=(("L", 20.0),))
+            Engine(cfg).run()
+            events = list(read_log(cfg.log_path))
+        announces = [e for e in events if e["kind"] == "LEADER_ANNOUNCE"]
+        self.assertEqual(len(announces), 1,
+                         f"单次故障产生了 {len(announces)} 次选举（选举风暴）")
+        self.assertEqual(announces[0]["leader_epoch"], 1)
+
+    def test_no_fault_means_no_election(self):
+        """无故障场景**不得**产生任何选举事件。
+
+        golden digest 的完整性依赖这一点：无故障路径必须逐位不变。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = replace(load_config(SCENARIO),
+                          log_path=str(Path(tmp) / "nofault.jsonl"))
+            Engine(cfg).run()
+            events = list(read_log(cfg.log_path))
+        self.assertEqual([e for e in events if e["kind"] == "LEADER_ANNOUNCE"],
+                         [], "无故障场景发生了选举")
+
+    def test_the_new_leader_is_not_a_relay(self):
+        """中继不参选：一旦中继成了主节点，它就会离开站位去送货，
+        把自己作为通信基础设施的价值抹掉。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = replace(load_config(SCENARIO),
+                          log_path=str(Path(tmp) / "elect.jsonl"),
+                          duration=200.0, kills=(("L", 20.0),))
+            Engine(cfg).run()
+            events = list(read_log(cfg.log_path))
+        announces = [e for e in events if e["kind"] == "LEADER_ANNOUNCE"]
+        self.assertTrue(announces, "主节点被杀却没有选举")
+        elected = announces[0]["node_id"]
+        self.assertFalse(elected.startswith("R"),
+                         f"中继 {elected} 当选了主节点")
+
+    def test_a_revived_old_leader_cannot_take_back_over(self):
+        """旧主节点复活后**不得复辟**。
+
+        `leader_epoch` 在选举时递增，这正是 `STALE_EPOCH` 分支第一次
+        真正生效——在此之前它恒为 0、从不递增，是一条死代码。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = replace(load_config(SCENARIO),
+                          log_path=str(Path(tmp) / "revive.jsonl"),
+                          duration=200.0,
+                          kills=(("L", 20.0),), revives=(("L", 60.0),))
+            Engine(cfg).run()
+            events = list(read_log(cfg.log_path))
+        announces = [e for e in events if e["kind"] == "LEADER_ANNOUNCE"]
+        self.assertTrue(announces, "主节点被杀却没有选举")
+        after_revive = [e for e in events if e["t"] > 60.0
+                        and e["kind"] in ("TASK_ASSIGN", "TASK_REASSIGN")
+                        and e.get("node_id") == "L"]
+        self.assertEqual(after_revive, [],
+                         f"复活的旧主节点复辟了：{len(after_revive)} 条指令署名 L")
+        self.assertEqual(len(announces), 1,
+                         f"复活引发了额外选举，共 {len(announces)} 次")
 
     def test_revived_node_does_not_fly_on_a_flat_battery(self):
         """★ 复活一个电量耗尽的节点，不能让它带着 0 电量复飞。

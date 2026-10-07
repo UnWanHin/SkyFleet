@@ -71,6 +71,9 @@ class NodeAgent:
 
         #: node_id -> 最近一次直接收到其心跳的时刻（用于邻居间接探测）
         self.last_heard: dict[str, float] = {}
+        #: 当前主节点。**可变**：主节点故障后由引擎切换到新当选者，
+        #: 否则遥测与上游选择会永远朝着一个已经死掉的节点发。
+        self.leader_id: str = config.leader_id
         #: 消息类型 -> 业务层处理器（仅装配层会注册）
         self.handlers: dict[str, Callable[[Msg, float, float], None]] = {}
 
@@ -123,7 +126,7 @@ class NodeAgent:
         # 目的地址始终是**逻辑**目的地（主节点）；中继由 next_hop 决定。
         # 若把中继写进 dst，中继就会把它当作本机业务消息处理，
         # 从而被会话/版本校验挡住——那样中继转发永远不可能成功。
-        target = dst if dst is not None else self.config.leader_id
+        target = dst if dst is not None else self.leader_id
         return self.submit(self._heartbeat(t, target), t)
 
     def on_telemetry_tick(self, t: float) -> bool:
@@ -144,7 +147,7 @@ class NodeAgent:
 
     def _telemetry(self, t: float) -> Msg:
         return Msg.new(
-            "TELEMETRY", src=self.node.node_id, dst=self.config.leader_id,
+            "TELEMETRY", src=self.node.node_id, dst=self.leader_id,
             t=t, msg_id=self.new_msg_id(), seq=self.next_seq("TELEMETRY"),
             session_id=self.session_id,
             leader_epoch=self.leader_epoch,
@@ -220,11 +223,11 @@ class NodeAgent:
 
     def upstream(self) -> str:
         """当前上游：有中继则走中继，否则直连主节点。"""
-        return self.routing.parent or self.config.leader_id
+        return self.routing.parent or self.leader_id
 
     def next_hop(self, msg: Msg) -> str:
         """物理下一跳。逻辑目的地为 msg.dst，可能经由中继。"""
-        if msg.dst == self.config.leader_id and self.routing.parent:
+        if msg.dst == self.leader_id and self.routing.parent:
             return self.routing.parent
         return msg.dst
 

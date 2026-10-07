@@ -141,6 +141,11 @@ class Engine:
         self.log: EventLog | None = None
 
         self._built = False
+        #: **当前**主节点。可变：主节点失效后由选举切换到新当选者。
+        #: 执行期一律用它，不要用 config.leader_id —— 那是**初始**主节点。
+        self.leader_id: str = config.leader_id
+        #: 最近一次听到主节点心跳的时刻（引擎视角，用于判失联）。
+        self._last_leader_beat: float = 0.0
         self._kills: list[tuple[str, float]] = []
         self._revives: list[tuple[str, float]] = []
         self._tx_index: dict[int, _Tx] = {}
@@ -393,8 +398,12 @@ class Engine:
         if not agent.alive:
             return
         t = ev.t
-        if agent.node.role is Role.LEADER:
+        if agent.node.node_id == self.leader_id:
+            # 判据是"是不是**当前**主节点"，不是初始 Role：故障切换后
+            # 新主节点的 Role 仍是 SLAVE，用角色判会让它发单播心跳，
+            # 其余节点收不到，选举会被反复触发（选举风暴）。
             agent.on_heartbeat_tick(t, dst=BROADCAST)
+            self._last_leader_beat = t
         else:
             agent.on_heartbeat_tick(t)
         assert self.log is not None
@@ -409,11 +418,104 @@ class Engine:
             return
         t = ev.t
         agent.on_telemetry_tick(t)
-        if agent.node.node_id != self.config.leader_id:
+        if agent.node.node_id != self.leader_id:
             self._observe_link(agent, t)
+        self._maybe_elect(t)
         self.scheduler.schedule_at(
             self._next_periodic(agent, "tlm", self.config.telemetry_period, t),
             EV_TELEMETRY, agent)
+
+    #: 主节点失联多久后触发选举（心跳周期的倍数）。
+    #:
+    #: 必须 > 1.5（主节点自己判成员丢失用的阈值），否则正常时钟漂移
+    #: 就会触发一次选举；又要足够小，否则集群空转太久。
+    ELECTION_TIMEOUT_FACTOR = 3.0
+
+    def _maybe_elect(self, t: float) -> None:
+        """主节点失联时选举新主节点。
+
+        规则刻意做得极小：候选人按 node_id **字典序**最小者当选。理由见
+        规格 §2.2——本仿真的目标是**可观测的协议行为**，不是分布式共识的
+        正确性证明；规则必须简单到能在报告里用一段话说清，且能解释每一条
+        新事件。要更强的保证，应先有明确的论文级需求。
+
+        中继不参选：它们是通信基础设施，一旦成为主节点就会离开站位。
+        """
+        assert self.log is not None
+        leader_agent = self.agents.get(self.leader_id)
+        if leader_agent is not None and leader_agent.alive:
+            timeout = self.ELECTION_TIMEOUT_FACTOR * self.config.heartbeat_period
+            if t - self._last_leader_beat <= timeout:
+                return                      # 主节点健在，无需选举
+        # 候选：活着、不是中继、不在迫降/坠机集合内。
+        candidates = sorted(
+            nid for nid, a in self.agents.items()
+            if a.alive and nid not in self.relay_ids
+            and nid not in self.grounded and nid != self.leader_id)
+        if not candidates:
+            return                          # 全灭：无解，如实留空
+        self._rebind_leader(candidates[0], t)
+
+    def _rebind_leader(self, new_id: str, t: float) -> None:
+        """把主节点职责移交给 new_id，并让全集群改指新主节点。"""
+        assert self.leader is not None and self.log is not None
+        old_id = self.leader_id
+        new_agent = self.agents[new_id]
+        # 任期 +1：这是 `STALE_EPOCH` 分支第一次**真正生效**。
+        # 在此之前 leader_epoch 恒为 0、从不递增，那条分支是死代码。
+        new_agent.leader_epoch = self.agents[old_id].leader_epoch + 1
+        new_agent.node.role = Role.LEADER
+        self.leader_id = new_id
+        # 重置"最近听到主节点心跳"的时刻。
+        #
+        # 不做这一步会引发**选举风暴**：新主节点要到下一个心跳周期才会
+        # 发心跳，而 `_last_leader_beat` 仍是旧主节点的陈值，于是每次
+        # 遥测巡检都判"新主节点也失联"，反复重选。实测一次击杀产生
+        # 了 3 次 LEADER_ANNOUNCE。这一行给新主节点一个心跳周期的宽限。
+        self._last_leader_beat = t
+        # 会话交换：新主节点用的是它**当从机时**的会话，而其他节点的
+        # view.sessions 里只有旧主节点的会话，于是新主节点发出的所有
+        # 任务指派都会被判 STALE_SESSION 挡下——实测未做这一步时，
+        # 完成率是 0.000，日志里 6196 条 STALE_SESSION。
+        #
+        # 这里模拟"各节点收到 LEADER_ANNOUNCE 后接纳新主节点的会话"。
+        # 刻意**不**调用 identity.join() 换会话：那会让新主节点的旧会话
+        # 立即失效，它在其他节点的成员记录里会变成一次"重连"，
+        # 反而制造一轮无关的失效/恢复事件。
+        new_agent.view.sessions.add(new_agent.session_id)
+        for agent in self.agents.values():
+            # 全集群改指新主节点：否则遥测与上游选择会永远朝着一个
+            # 已经失效的节点发，消息只会进黑洞。
+            agent.leader_id = new_id
+            agent.view.sessions.add(new_agent.session_id)
+            new_agent.view.sessions.add(agent.session_id)
+        old = self.leader
+        self.leader = LeaderController(
+            self.config, self.board, new_agent.membership, new_agent,
+            self.identity, self.log,
+            busy_nodes=frozenset(self.relay_ids),
+            grounded_nodes=self.grounded)
+        # 继承任务编排状态：新主节点必须知道哪些任务已经指派给谁，
+        # 否则会把同一任务重复派给第二个节点。
+        self.leader.mission_version = old.mission_version + 1
+        self.leader.assignments = dict(old.assignments)
+        new_agent.mission_version = self.leader.mission_version
+        # 主节点专属处理器必须跟着移交。`wire_leader_handlers()` 把它
+        # 注册在**初始**主节点上，故障切换后新主节点没有它，于是
+        # DELIVERY_CONFIRM 会被 accept() 放行、却**没有任何处理器接手**——
+        # 消息静默消失，任务永远停在“已取件”。实测：17 笔确认送达 S1，
+        # `_handle_delivery_confirm` 调用次数为 0，完成率 0.000。
+        self.agents[old_id].handlers.pop("DELIVERY_CONFIRM", None)
+        new_agent.handlers["DELIVERY_CONFIRM"] = self._handle_delivery_confirm
+        # 主节点巡检（EV_LEADER_CHECK）此前只在**初始**主节点上排程，
+        # 新主节点从不会被排到，于是 `assign_pending` / `_sync_assignments`
+        # / `_check_safety` 全部停摆——任务派出去却永远不会被标记完成，
+        # 完成率掉到 0.000 而没有任何错误事件。必须在这里接上。
+        self.scheduler.schedule_at(
+            t + self.config.heartbeat_period, EV_LEADER_CHECK)
+        self.log.write(EventKind.LEADER_ANNOUNCE, t, node_id=new_id,
+                       old_leader=old_id,
+                       leader_epoch=new_agent.leader_epoch)
 
     def _observe_link(self, agent: NodeAgent, t: float) -> None:
         """评估到主节点与各中继的链路，驱动路由迟滞与遮挡事件。
@@ -423,10 +525,10 @@ class Engine:
         路由设计缺陷。
         """
         assert self.link_model is not None and self.log is not None
-        leader_node = self.nodes[self.config.leader_id]
+        leader_node = self.nodes[self.leader_id]
 
         to_leader = self.link_model.evaluate(agent.node, leader_node, t)
-        best_id, best_quality = self.config.leader_id, to_leader.quality
+        best_id, best_quality = self.leader_id, to_leader.quality
 
         # 只有直连不足以支撑时才把中继列为候选。详见 SimConfig 中的说明：
         # 无条件取"最优上游"会让中继承担本可直接送达的流量，信道负载翻倍。
@@ -606,7 +708,7 @@ class Engine:
         """
         agent = self.agents[node_id]
         msg = Msg.new("DELIVERY_CONFIRM", src=node_id,
-                      dst=self.config.leader_id,
+                      dst=self.leader_id,
                       t=t, msg_id=agent.new_msg_id(),
                       seq=agent.next_seq("DELIVERY_CONFIRM"),
                       session_id=agent.session_id,
@@ -658,7 +760,7 @@ class Engine:
         cfg = self.config
         t = ev.t
         assert self.log is not None and self.leader is not None
-        agent = self.agents[cfg.leader_id]
+        agent = self.agents[self.leader_id]
         if not agent.alive:
             # 死掉的主节点必须立刻停止指挥，且**不再续排**。
             #
@@ -668,12 +770,12 @@ class Engine:
             # 在信道上从未发生过（主节点死后 MSG_TX 恒为 0），却会污染任务
             # 完成率与路由切换次数。
             #
-            # 注意：这里只是**停止**，本模拟器没有主节点故障切换。
-            # 主节点一旦失效，整个集群就失去任务编排能力——这是已知限制，
-            # 不是"已经处理好了"。见设计文档的 P2 候选。
+            # 注意：这里只是让**死者**停止。接管由 `_maybe_elect` 负责
+            # （P2 切片 B 补上）——它由 `_on_telemetry` 驱动，因此不依赖
+            # 这个回调继续排程。
             return
         members = [n for n in agent.membership.members()
-                   if n != cfg.leader_id]
+                   if n != self.leader_id]
 
         for node_id in members:
             record = agent.membership.record(node_id)
@@ -751,9 +853,9 @@ class Engine:
         assert self.log is not None
         cfg = self.config
         for node_id, agent in self.agents.items():
-            if node_id == cfg.leader_id or not agent.alive:
+            if node_id == self.leader_id or not agent.alive:
                 continue
-            leader_seen = agent.last_heard.get(cfg.leader_id)
+            leader_seen = agent.last_heard.get(self.leader_id)
             status = agent.position.report(agent.node, t)
             fence = geofence_breach(agent.node.pos, self.geofences)
             link_lost = (leader_seen is None
