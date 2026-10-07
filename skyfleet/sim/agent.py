@@ -14,7 +14,7 @@ from typing import Any, Callable, Protocol
 from skyfleet.kernel.config import SimConfig
 from skyfleet.kernel.rng import RngRegistry
 from skyfleet.observe.events import DropReason, EventKind
-from skyfleet.protocol.auth import compute_mac
+from skyfleet.protocol.auth import compute_mac, verify_mac
 from skyfleet.protocol.identity import IdentityRegistry
 from skyfleet.protocol.message import Msg, Rel
 
@@ -261,6 +261,29 @@ class NodeAgent:
     # ---------- 接收 ----------
 
     def receive(self, msg: Msg, t: float, quality: float = 1.0) -> AcceptDecision:
+        # ★ 认证必须在**任何改动接收端状态的检查之前**，而不只是在
+        # `accept()` 之内。这是一个被探针发现的真实缺陷：`accept()` 里
+        # 认证确实排在最先，但它下面这两道检查都在 `accept()` **之前**
+        # 运行，而且都会改动接收端状态：
+        #
+        #   1. `seen_msg_ids.seen(msg_id)` —— 去重表，**检查时即登记**；
+        #   2. `deadline` 过期检查（只读，但同样不该为未认证消息做决策）。
+        #
+        # 可利用的攻击：`new_msg_id()` 返回 `f"{node_id}:{n}"`，`n` 是每
+        # 节点从 1 递增的计数器，**完全可预测**。攻击者抢先用某个即将出现
+        # 的 msg_id 发一条伪造消息，去重表就登记了它；随后**真实**节点用
+        # 同一 msg_id 发出的消息会被判 DEDUP 丢弃。
+        #
+        # 认证开着也挡不住——因为认证根本还没跑。这正是「未经认证的消息，
+        # 其所有字段都不可信」的完整含义：`msg_id` 也是字段之一。
+        auth_key = self._auth_key()
+        if auth_key is not None and not verify_mac(msg, auth_key, msg.checksum):
+            self.log.write(EventKind.MSG_DROP, t, node_id=self.node.node_id,
+                           msg_id=msg.msg_id, msg_type=msg.msg_type,
+                           src=msg.src, dst=msg.dst,
+                           reason=DropReason.BAD_AUTH)
+            return AcceptDecision.BAD_AUTH
+
         if self.seen_msg_ids.seen(msg.msg_id, t):
             # 重传副本仍要确认：去重抑制的是**动作**，不是**确认**。
             # 若此处不回 ACK，源端会一直重传到有效期结束，而接收端其实
@@ -283,8 +306,10 @@ class NodeAgent:
                            reason=DropReason.DEADLINE_MISSED)
             return AcceptDecision.STALE_SEQ
 
-        decision = accept(msg, self.view, self.dedup, t,
-                          auth_key=self._auth_key())
+        # 认证已在本方法开头完成，不再重复传给 accept()。`accept()` 保留
+        # `auth_key` 参数是给**直接调用方**（含单元测试）用的：它是协议
+        # 规则的公开入口，应当能独立验证「认证最先」这条规则。
+        decision = accept(msg, self.view, self.dedup, t)
 
         if decision is not AcceptDecision.ACCEPT:
             if decision in (AcceptDecision.DEDUP, AcceptDecision.STALE_SEQ):

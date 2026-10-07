@@ -23,6 +23,7 @@ from pathlib import Path
 from skyfleet.kernel.config import load_config
 from skyfleet.observe.log import read_log
 from skyfleet.protocol.auth import compute_mac
+from skyfleet.protocol.version import AcceptDecision
 from skyfleet.sim.engine import Engine
 
 SCENARIO = Path("skyfleet/scenarios/baseline_small.json")
@@ -197,6 +198,94 @@ class TestResidualGapIsClosed(unittest.TestCase):
                         "注入没有发生，本测试会空转")
         self.assertEqual(drops(events, "BAD_AUTH"), [],
                          "认证关闭时不应出现 BAD_AUTH")
+
+
+class TestNoStateMutationBeforeAuthentication(unittest.TestCase):
+    """★ 认证必须在**任何改动接收端状态的检查**之前，而不只是在 accept() 内。
+
+    这是实现 P4 时被探针发现的缺陷：`accept()` 内确实把认证放在最前，但
+    `NodeAgent.receive()` 在调用 `accept()` **之前**还有两道检查：
+
+      1. `seen_msg_ids.seen(msg_id)` —— 去重表，**检查时即登记**；
+      2. `deadline` 过期检查。
+
+    于是未认证的消息**在被拒绝之前就已经改动了接收端状态**。可利用的
+    攻击：`msg_id` 是每节点从 1 递增的计数器（`new_msg_id()` 返回
+    `f"{node_id}:{n}"`），**完全可预测**。攻击者抢先用某个即将出现的
+    msg_id 发一条伪造消息，去重表就把它登记下来；随后**真实**节点用同一
+    个 msg_id 发出的消息会被判 DEDUP 丢弃。
+
+    认证开着也挡不住——因为认证根本还没跑。这正是「未经认证的消息，其
+    所有字段都不可信」这句话的完整含义：`msg_id` 也是字段之一。
+    """
+
+    def _leader_with_log(self, tmp, auth):
+        cfg = scenario(tmp, auth=auth, name="squat", duration=30.0)
+        engine = Engine(cfg)
+        engine.build()
+        engine._open_log()
+        return cfg, engine
+
+    def _forged(self, msg_id, dst):
+        from skyfleet.protocol.message import Msg, Qos, Rel
+        return Msg.new("HEARTBEAT", src="S9", dst=dst, t=1.0,
+                       msg_id=msg_id, seq=999_999,
+                       session_id="S9#forged", payload={"squat": True},
+                       qos=Qos.Q1, reliability=Rel.R2)
+
+    def _legit(self, msg_id, src, session_id, key=None):
+        from skyfleet.protocol.message import Msg, Qos, Rel
+        msg = Msg.new("HEARTBEAT", src=src, dst="S1", t=2.0,
+                      msg_id=msg_id, seq=1, session_id=session_id,
+                      payload={"pos": [0, 0, 0], "energy": 100.0,
+                               "nearby": []},
+                      qos=Qos.Q1, reliability=Rel.R2)
+        if key:
+            from dataclasses import replace as _replace
+            msg = _replace(msg, checksum=compute_mac(msg, key))
+        return msg
+
+    def _squat(self, tmp, auth):
+        """跑一次预占，返回（被预占的 msg_id, 真实消息的判定）。"""
+        cfg, engine = self._leader_with_log(tmp, auth)
+        try:
+            leader = engine.agents[cfg.leader_id]
+            # 攻击者预测 leader 的**下一个** msg_id
+            predicted = f"{cfg.leader_id}:{leader._msg_seq + 1}"
+            leader.receive(self._forged(predicted, cfg.leader_id), 1.0)
+            decision = leader.receive(
+                self._legit(predicted, cfg.leader_id, leader.session_id,
+                            KEY if auth else None), 2.0)
+        finally:
+            engine.log.close()
+        return predicted, decision
+
+    def test_without_authentication_the_squat_succeeds(self):
+        """残差的**正面复现**：无认证时预占必然成功。
+
+        没有认证就无法分辨伪造与真实，去重表登记谁都一样——这不是实现
+        缺陷，是「无认证」的必然结果。本测试把它固定下来，同时作为下面
+        那条的对照：否则"认证后挡住了"可能只是因为攻击本来就没生效。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            predicted, decision = self._squat(tmp, auth=False)
+        self.assertIs(decision, AcceptDecision.DEDUP,
+                      f"无认证时预占 {predicted} 本应成功（真实消息被误杀）")
+
+    def test_authentication_prevents_the_squat(self):
+        """★ 认证开启后，未认证的伪造**不得**占用 msg_id。
+
+        关键是伪造必须在**去重表登记之前**就被拒——若认证仍在 `accept()`
+        里（去重之后），伪造会被拒但 msg_id 已被登记，真实消息照样被误杀。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            predicted, decision = self._squat(tmp, auth=True)
+        self.assertIsNot(
+            decision, AcceptDecision.DEDUP,
+            f"认证开启后，未认证的伪造仍占用了 msg_id {predicted}，真实消息"
+            f"被误判为 DEDUP——认证没有排在 receive() 的状态改动之前")
+        self.assertIs(decision, AcceptDecision.ACCEPT,
+                      "真实消息应当被正常接受")
 
 
 class TestAuthenticationDoesNotOverreach(unittest.TestCase):
