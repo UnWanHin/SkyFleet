@@ -122,5 +122,10 @@
 ```
 
 原始逐次结果在 `out/study/relay_layout/runs.csv`；汇总在
-`out/study/relay_layout/summary.md`。`out/` 不纳入版本控制，规格文件
-（`skyfleet/study/specs/relay_layout.json`）在版本控制内，因此结果可重建。
+`out/study/relay_layout/summary.md`；规格在
+`skyfleet/study/specs/relay_layout.json`。
+
+三者**均已入库**：`.gitignore` 的约定是仿真产物中「体积大、可由命令重建」
+的部分（逐次日志、PNG、回放 HTML）不入库，而 `spec.json` / `runs.csv` /
+`summary.md` 是报告直接引用的交付物，必须入库。本文件引用的每个数字都
+能在版本控制内的 `runs.csv` 里核对，不需要重跑。
