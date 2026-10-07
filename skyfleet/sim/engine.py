@@ -28,6 +28,7 @@ from skyfleet.mission.task import TaskBoard, TaskState
 from skyfleet.observe.events import DropReason, EventKind
 from skyfleet.observe.log import EventLog
 from skyfleet.protocol.identity import IdentityRegistry, Role
+from skyfleet.protocol.auth import compute_mac
 from skyfleet.protocol.message import Msg
 from skyfleet.protocol.version import AcceptDecision
 from skyfleet.sim.agent import NodeAgent
@@ -263,6 +264,15 @@ class Engine:
                 f"未知的 on_battery_empty={raw_policy!r}，"
                 f"可选 none / land / crash")
         self._battery_policy = policy
+
+        # 认证配置的合法性：开启却无密钥是最危险的组合——它会让
+        # `verify_mac` 拿空密钥去比对，所有消息都验不过，集群静默瘫痪，
+        # 而配置看起来"开了认证"（像是更安全了）。必须当场报错。
+        if config.auth_enabled and not config.auth_key:
+            raise ValueError(
+                "auth_enabled=True 但 auth_key 为空：认证开启却没有密钥，"
+                "所有消息都会验签失败（集群会静默瘫痪）。"
+                "请设置 auth_key，或关闭 auth_enabled。")
         self._sample_countdown = 0
 
     # ================= 构建 =================
@@ -1384,6 +1394,12 @@ class Engine:
         if not receiver.alive:
             return
 
+        # `signed=True` 表示这条注入携带**有效 MAC**，用来模拟两类
+        # 认证防不住的情形（抓包重放 / 持有组密钥的内部成员）。默认
+        # False：外部攻击者没有密钥，伪造的消息会在 accept() 的认证处
+        # 被拒——这正是 P4 要关闭的残差。
+        if attack.signed and self.config.auth_key:
+            msg = replace(msg, checksum=compute_mac(msg, self.config.auth_key))
         self.adversary.injected.append(msg.msg_id)
         assert self.log is not None
         self.log.write(EventKind.ATTACK_INJECT, ev.t,

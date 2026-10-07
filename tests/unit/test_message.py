@@ -17,9 +17,10 @@ class TestEnums(unittest.TestCase):
         # 13 = 原有 12 种 + STALE_SEQ。后者本来就由 accept() 返回并被写进
         # 日志，却长期不在枚举里，"封闭枚举"这条约束在代码层面是假的。
         # 13 -> 14：新增 SEQ_OUT_OF_WINDOW（序号越窗，冒充者特征）。
-        # 与 STALE_SEQ 分开是**观测能力**的要求：混用会让"被攻击"与
+        # 14 -> 15：新增 BAD_AUTH（消息认证码无效，P4）。
+        # 与既有原因分开是**观测能力**的要求：混用会让"被攻击"与
         # "自己掉线"在日志里长得一样。
-        self.assertEqual(len(DropReason), 14)
+        self.assertEqual(len(DropReason), 15)
         self.assertEqual(DropReason.OCCLUDED.value, "OCCLUDED")
         self.assertEqual(DropReason.STALE_SEQ.value, "STALE_SEQ")
 

@@ -52,6 +52,19 @@ class SimConfig:
     #: 近乎全有或全无，门限因此调不动。没有可比较的布点，任何「优化」都
     #: 不可验证。默认 `ring` 保持历史行为逐位不变。
     relay_layout: str = "ring"
+    #: 消息认证（HMAC + 组密钥）。**默认关闭**，与 `on_battery_empty="none"`、
+    #: `energy_model="linear"` 同一模式：新机制默认不改变既有行为，因此
+    #: golden digest 逐位不变，报告中已有的数字无需复核。
+    #:
+    #: 开启后可关闭 P2 切片 A 留下的残差——无认证时序号滑动窗口防不住
+    #: 「先到的冒充者」。详见 protocol/auth.py 与 P4 规格。
+    auth_enabled: bool = False
+    #: 组预共享密钥（`auth_enabled` 为真时必填）。
+    #:
+    #: 用组密钥而非逐对密钥：场景是同一集群内网，且广播需要所有成员都能
+    #: 验证。代价是**持有密钥的内部成员可以伪造**——这是组密钥方案的固有
+    #: 边界，已如实记录，不假装认证解决了一切。
+    auth_key: str = ""
     tasks: int = 20
     initial_energy: float = 100.0
     min_energy_for_task: float = 20.0

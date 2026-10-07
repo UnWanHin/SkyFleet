@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Any, Callable, Protocol
 
 from skyfleet.kernel.config import SimConfig
 from skyfleet.kernel.rng import RngRegistry
 from skyfleet.observe.events import DropReason, EventKind
+from skyfleet.protocol.auth import compute_mac
 from skyfleet.protocol.identity import IdentityRegistry
 from skyfleet.protocol.message import Msg, Rel
 
@@ -171,6 +173,7 @@ class NodeAgent:
         """限流 -> 入队 -> 登记重传 -> 立即尝试发送一条。"""
         if not self.alive:
             return False
+        msg = self._authenticate(msg)
 
         if not self.rate_limiter.allow(msg, t):
             self.log.write(EventKind.MSG_DROP, t, node_id=self.node.node_id,
@@ -225,6 +228,30 @@ class NodeAgent:
         """当前上游：有中继则走中继，否则直连主节点。"""
         return self.routing.parent or self.leader_id
 
+    def _auth_key(self) -> str | None:
+        """本机启用认证时的组密钥；未启用返回 None（表示不校验）。"""
+        return self.config.auth_key if self.config.auth_enabled else None
+
+    def _authenticate(self, msg: Msg) -> Msg:
+        """对**尚未签名**的消息签名。
+
+        这是整个仿真里**唯一**的签名点。放在 `submit` 是因为它是唯一的
+        **发源**路径（限流、入队、登记重传都从这里开始），一处签名就不会
+        出现「某个构造点忘了签」的漏洞。
+
+        判据是「checksum 是否为空」，它同时承担了区分发源与转发的职责：
+        `forward` 用 `dataclasses.replace(msg, hop=..., ttl=...)` 保留
+        checksum，因此转发路径进来时已经带 MAC，**不会**被重签——重签会
+        顶着中继的身份，接收端会判 BAD_AUTH，症状是「中继一转发就丢包」，
+        看起来像链路问题。
+
+        对抗注入绕过 `submit` 直达 `_on_rx`，所以外部攻击者的消息默认
+        不带有效 MAC——这正是我们想要的。
+        """
+        if not self.config.auth_enabled or msg.checksum:
+            return msg
+        return replace(msg, checksum=compute_mac(msg, self.config.auth_key))
+
     def next_hop(self, msg: Msg) -> str:
         """物理下一跳。逻辑目的地为 msg.dst，可能经由中继。"""
         if msg.dst == self.leader_id and self.routing.parent:
@@ -256,7 +283,8 @@ class NodeAgent:
                            reason=DropReason.DEADLINE_MISSED)
             return AcceptDecision.STALE_SEQ
 
-        decision = accept(msg, self.view, self.dedup, t)
+        decision = accept(msg, self.view, self.dedup, t,
+                          auth_key=self._auth_key())
 
         if decision is not AcceptDecision.ACCEPT:
             if decision in (AcceptDecision.DEDUP, AcceptDecision.STALE_SEQ):

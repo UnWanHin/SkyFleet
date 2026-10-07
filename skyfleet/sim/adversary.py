@@ -45,6 +45,14 @@ class Attack:
     #: 否则消息会先被会话校验挡掉，测不到序号与任期检查。
     node_id: str = "S1"
     target: str = ""
+    #: 注入的消息是否携带**有效 MAC**。
+    #:
+    #: 默认 False —— 外部攻击者没有组密钥，伪造的消息在认证处即被拒。
+    #: 置真用于模拟两类**认证防不住**的情形，使测试能证明认证确实挡住了
+    #: 伪造（而不只是"注入都失败了"）：
+    #:   - 抓包重放：MAC 有效，但序号/去重会挡下；
+    #:   - 内部成员：持有组密钥，认证**不防**（组密钥方案的固有边界）。
+    signed: bool = False
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Attack":
@@ -57,6 +65,7 @@ class Attack:
         return cls(kind=kind, t=float(raw.get("t", 0.0)),
                    node_id=str(raw.get("node_id", "S1")),
                    target=str(raw.get("target", "")),
+                   signed=bool(raw.get("signed", False)),
                    seq=(int(raw["seq"]) if raw.get("seq") is not None
                         else None),
                    epoch=(int(raw["epoch"]) if raw.get("epoch") is not None
@@ -104,10 +113,13 @@ def build_attack_msg(attack: Attack, *, leader_id: str, session_id: str,
                        deadline=deadline)
 
     if attack.kind is AttackKind.STALE_EPOCH:
-        # 不夹到 0：当前实现里 leader_epoch 从不递增（没有重新选主流程），
-        # 夹到 0 会让注入的任期与当前任期相同，攻击变成空操作，
-        # 那条防线看起来"通过"了其实根本没被触发。用更小的数（含负数），
-        # 才能真正走一遍 STALE_EPOCH 分支。
+        # 不夹到 0：夹到 0 会让注入的任期与当前任期相同（甚至更高），
+        # 攻击变成空操作，那条防线看起来"通过"了其实根本没被触发。
+        # 用更小的数（含负数）才能真正走一遍 STALE_EPOCH 分支。
+        #
+        # 注：早前这里的理由是"leader_epoch 从不递增"。P2 切片 B 引入选举后
+        # **已不再成立**——任期会随重新选主递增，故 `leader_epoch - 1` 仍然
+        # 是一个比当前小的值，理由本身要换成上面那条。
         return Msg.new("HEARTBEAT", src=attack.node_id, dst=dst,
                        t=t_created, msg_id=f"stale:{attack.t}",
                        seq=(attack.seq if attack.seq is not None else seq),

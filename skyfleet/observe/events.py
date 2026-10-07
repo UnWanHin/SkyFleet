@@ -29,6 +29,9 @@ class DropReason(str, enum.Enum):
     #: 序号跃变超出滑动窗口——冒充者的特征。与 STALE_SEQ 分开，
     #: 才能把"被攻击"与"自己掉线"在日志里区分开。
     SEQ_OUT_OF_WINDOW = "SEQ_OUT_OF_WINDOW"
+    #: 消息认证码无效。与既有原因分开是**观测能力**的要求：混用会让
+    #: 「被伪造」和「自己掉线」在日志里长得一模一样。
+    BAD_AUTH = "BAD_AUTH"
     NO_ROUTE = "NO_ROUTE"                  # 当前通信关系不可达
     RATE_LIMITED = "RATE_LIMITED"          # 高优先级配额耗尽
     UNAUTHORIZED = "UNAUTHORIZED"          # 权限校验失败（P1 注入用）

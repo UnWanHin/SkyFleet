@@ -171,16 +171,23 @@ class TestSeqSlidingWindow(unittest.TestCase):
         它会被当作锚点。此后真实心跳确实会被误判为过期。
 
         这不是本切片的实现缺陷，而是「无认证的序号窗口」的本质边界：
-        要挡住先到的冒充者，只能靠**认证**（签名/MAC），而本仿真的
-        消息结构里 checksum 字段仍是 P0 占位（见 message.py）。
-        本测试把该残差**固定下来**，避免有人误以为滑动窗口已经安全。
+        要挡住先到的冒充者，只能靠**认证**（MAC）。
+
+        **P4 已提供认证**（`docs/superpowers/specs/2026-10-09-p4-message-
+        authentication-spec.md`）：`auth_enabled=True` 时冒充者在认证处即被
+        拒，残差关闭；本测试验证的是**默认（无认证）**下残差仍存在——这
+        是刻意的默认值（新机制默认不改变既有行为）。两侧的完整对照见
+        `tests/unit/test_auth.py` 的 `TestFirstArrivingSpoofer`。
+
+        本测试把残差**固定下来**，避免有人误以为滑动窗口本身已经安全。
         """
         view, dedup = self._view(), DedupTable(ttl=10.0, capacity=100)
         # 冒充者先到（接收端无基准）
         self.assertIs(accept(self._msg(10_000_000), view, dedup, 0.0),
                       AcceptDecision.ACCEPT,
-                      "无基准时无法拒绝——若这里变成越窗，说明引入了认证，"
-                      "应当同时更新本测试与规格 §1.5")
+                      "无基准时无法拒绝——这是默认（未启用认证）下的既定"
+                      "行为。若这里变成越窗，说明默认值被改了，golden "
+                      "digest 也会随之变化")
         # 真实心跳因此被误判
         self.assertIs(accept(self._msg(1), view, dedup, 1.0),
                       AcceptDecision.STALE_SEQ,

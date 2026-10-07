@@ -8,6 +8,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 
+from skyfleet.protocol.auth import verify_mac
 from skyfleet.protocol.message import MISSION_SCOPED, Msg
 
 
@@ -15,6 +16,10 @@ class AcceptDecision(enum.Enum):
     """消息接受判定结果。非 ACCEPT 即为丢弃原因。"""
 
     ACCEPT = "ACCEPT"
+    #: 消息认证码无效。**必须独立**：混入既有原因会让「被伪造」与
+    #: 「自己掉线」在日志里长得一样，攻击不可观测——本项目已因同样的
+    #: 理由把 SEQ_OUT_OF_WINDOW 与 STALE_SEQ 分开过一次。
+    BAD_AUTH = "BAD_AUTH"
     STALE_EPOCH = "STALE_EPOCH"
     STALE_SESSION = "STALE_SESSION"
     STALE_VERSION = "STALE_VERSION"
@@ -77,12 +82,20 @@ DEFAULT_SEQ_WINDOW = 64
 
 
 def accept(msg: Msg, view: LocalView, dedup: DedupTable,
-           t: float, seq_window: int = DEFAULT_SEQ_WINDOW) -> AcceptDecision:
+           t: float, seq_window: int = DEFAULT_SEQ_WINDOW,
+           auth_key: str | None = None) -> AcceptDecision:
     """判定是否接受一条消息。
 
-    规则顺序不可调换：任期 -> 会话 -> 任务版本 -> 去重 -> 序列。
+    规则顺序不可调换：**认证** -> 任期 -> 会话 -> 任务版本 -> 去重 -> 序列。
     旧任期的消息即使会话未知，也必须报 STALE_EPOCH。
+
+    认证必须**最先**，这不是风格问题：**未经认证的消息，其所有字段都
+    不可信**，包括 `leader_epoch`。若先比任期，冒充者只要声称一个很大
+    的 `leader_epoch` 就能让接收端收下它并推进自己的任期视图，认证
+    形同虚设。`auth_key` 为 None 表示未启用认证（默认）。
     """
+    if auth_key is not None and not verify_mac(msg, auth_key, msg.checksum):
+        return AcceptDecision.BAD_AUTH
     if msg.leader_epoch < view.leader_epoch:
         return AcceptDecision.STALE_EPOCH
     if view.sessions and msg.session_id not in view.sessions:

@@ -92,7 +92,15 @@ view.last_seq[key] = msg.seq
 （10^7 量级）。`W` 作为 `accept()` 的参数注入（默认
 `DEFAULT_SEQ_WINDOW = 64`），便于测试与后续标定。
 
-### 1.4b 已知残差：先到的冒充者防不住
+### 1.4b 已知残差：先到的冒充者防不住 → **P4 已关闭**
+
+> **状态（2026-10-09）**：本残差已由 P4 消息认证关闭，见
+> `2026-10-09-p4-message-authentication-spec.md`。`auth_enabled=True`
+> 时冒充者在认证处即被拒（`BAD_AUTH`），接收端的序号状态不被污染。
+> 默认仍为关闭，故本节描述的默认行为**逐字不变**。
+> 验证：`tests/unit/test_auth.py::TestFirstArrivingSpoofer`（两侧对照）
+> 与 `tests/integration/test_message_authentication.py`。
+
 
 无认证时，若接收端**从未见过**这条流，就没有基准可判断 10^7 是否离谱，
 它会被当作锚点，此后真实心跳确实被误判。
