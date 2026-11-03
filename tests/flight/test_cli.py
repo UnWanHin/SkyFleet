@@ -16,7 +16,7 @@ class TestParser(unittest.TestCase):
     def test_all_documented_commands_are_registered(self):
         """文档里写的四条命令必须真的存在。"""
         parser = build_parser()
-        for name in ("demo", "render", "stills", "tune"):
+        for name in ("demo", "render", "stills", "tune", "view", "swarm"):
             with self.subTest(command=name):
                 args = parser.parse_args([name])
                 self.assertTrue(callable(getattr(args, "func", None)),
@@ -34,6 +34,12 @@ class TestParser(unittest.TestCase):
         """
         args = build_parser().parse_args(["tune"])
         self.assertEqual(args.axis, "x")
+
+    def test_view_defaults_to_single_drone(self):
+        """view 默认单机；--swarm N 才切多机。"""
+        self.assertEqual(build_parser().parse_args(["view"]).swarm, 0)
+        self.assertEqual(
+            build_parser().parse_args(["view", "--swarm", "11"]).swarm, 11)
 
     def test_tune_rejects_a_non_physical_axis(self):
         with self.assertRaises(SystemExit):

@@ -1,5 +1,6 @@
 """flightlab 命令行入口。
 
+    python -m flightlab view            开实时窗口，看它飞（鼠标可转视角）
     python -m flightlab demo            跑五航点任务并打印指标
     python -m flightlab render -o x.mp4 渲染 3D 视频
     python -m flightlab stills -o DIR   渲染报告插图（静态帧）
@@ -145,6 +146,19 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_view(args: argparse.Namespace) -> int:
+    from flightlab.viewer import view_single, view_swarm
+
+    if args.swarm:
+        print(f"打开 {args.swarm} 机实时窗口：鼠标拖动转视角，空格暂停，R 复位，"
+              f"关窗口退出")
+        view_swarm(count=args.swarm, duration=args.duration)
+    else:
+        print("打开单机实时窗口：↑↓ 改目标高度，空格暂停，R 复位，关窗口退出")
+        view_single(duration=args.duration, altitude=args.altitude)
+    return 0
+
+
 def _cmd_tune(args: argparse.Namespace) -> int:
     from flightlab.tuning import run_default_study
 
@@ -161,6 +175,14 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("demo", help="跑五航点任务并打印跟踪指标")
     d.add_argument("--duration", type=float, default=30.0, help="总时长 s")
     d.set_defaults(func=_cmd_demo)
+
+    v = sub.add_parser("view", help="交互式实时窗口（需要图形界面）")
+    v.add_argument("--swarm", type=int, default=0, metavar="N",
+                   help="查看 N 机编队而不是单机")
+    v.add_argument("--duration", type=float, default=1e9,
+                   help="最长运行秒数（默认一直跑）")
+    v.add_argument("--altitude", type=float, default=1.2)
+    v.set_defaults(func=_cmd_view)
 
     w = sub.add_parser("swarm", help="多机编队飞行并打印指标")
     w.add_argument("-n", "--count", type=int, default=11, help="机数")
