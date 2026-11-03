@@ -70,6 +70,17 @@ def _cmd_demo(args: argparse.Namespace) -> int:
 
 
 def _cmd_render(args: argparse.Namespace) -> int:
+    if args.swarm:
+        from flightlab.render import SwarmRenderConfig, render_swarm
+
+        cfg = SwarmRenderConfig(width=args.width, height=args.height,
+                                fps=args.fps)
+        path = render_swarm(args.output, count=args.swarm,
+                            duration=args.duration, cfg=cfg,
+                            progress=not args.quiet)
+        print(f"多机视频已写出：{path}")
+        return 0
+
     from flightlab.render import RenderConfig, render_mission
 
     cfg = RenderConfig(width=args.width, height=args.height, fps=args.fps)
@@ -91,6 +102,49 @@ def _cmd_stills(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_swarm(args: argparse.Namespace) -> int:
+    import math
+
+    from flightlab.swarm import SwarmLayout, SwarmSim
+
+    layout = SwarmLayout(count=args.count,
+                         radius=1.0 if args.count > 4 else 0.8, altitude=1.2)
+    sim = SwarmSim(layout)
+    sim.reset()
+    home = [sim.pos(i).copy() for i in range(args.count)]
+
+    def targets(t: float):
+        k = 0.5 * math.sin(2 * math.pi * t / 6.0)
+        out = []
+        for h in home:
+            r = math.hypot(h[0], h[1]) or 1.0
+            out.append(np.array([h[0] * (1 + k / r),
+                                 h[1] * (1 + k / r), 1.2]))
+        return out
+
+    log = sim.run(args.duration, targets)
+    pos = [log.positions(i) for i in range(args.count)]
+    print(f"{args.count} 机编队，仿真 {args.duration:.0f} s")
+    print(f"场景规模：{sim.model.nbody} bodies / {sim.model.njnt} joints / "
+          f"{sim.model.nu} actuators")
+    print()
+    print(f"{'机号':>4} {'末位置':>28} {'高度误差mm':>12} {'末转速':>8}")
+    worst_z = 0.0
+    for i in range(args.count):
+        p = pos[i][-1]
+        dz = abs(p[2] - 1.2) * 1000
+        worst_z = max(worst_z, dz)
+        print(f"{i:>4} ({p[0]:7.3f},{p[1]:7.3f},{p[2]:7.3f}) "
+              f"{dz:12.1f} {sim.rotor_speeds(i)[0]:8.0f}")
+    sep = min(float(np.linalg.norm(pos[i][-1] - pos[j][-1]))
+              for i in range(args.count) for j in range(i + 1, args.count))
+    print()
+    print(f"最大高度误差      : {worst_z:.1f} mm")
+    print(f"最小机间距        : {sep:.3f} m")
+    print(f"悬停转速理论值    : {PARAMS.omega_hover:.0f} rad/s")
+    return 0
+
+
 def _cmd_tune(args: argparse.Namespace) -> int:
     from flightlab.tuning import run_default_study
 
@@ -108,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--duration", type=float, default=30.0, help="总时长 s")
     d.set_defaults(func=_cmd_demo)
 
+    w = sub.add_parser("swarm", help="多机编队飞行并打印指标")
+    w.add_argument("-n", "--count", type=int, default=11, help="机数")
+    w.add_argument("--duration", type=float, default=10.0)
+    w.set_defaults(func=_cmd_swarm)
+
     r = sub.add_parser("render", help="渲染 3D 视频")
     r.add_argument("-o", "--output", default="flight.mp4")
     r.add_argument("--duration", type=float, default=18.0)
@@ -115,6 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--height", type=int, default=720)
     r.add_argument("--fps", type=int, default=30)
     r.add_argument("--quiet", action="store_true")
+    r.add_argument("--swarm", type=int, default=0, metavar="N",
+                   help="渲染 N 机编队而不是单机")
     r.set_defaults(func=_cmd_render)
 
     s = sub.add_parser("stills", help="渲染静态帧（报告插图）")

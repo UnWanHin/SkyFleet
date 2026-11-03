@@ -164,3 +164,88 @@ def render_stills(out_dir: str | Path, *, times: tuple[float, ...] = (0.0, 2.0, 
     finally:
         renderer.close()
     return written
+
+
+# ---------------------------------------------------------------- 多机
+
+@dataclass(frozen=True)
+class SwarmRenderConfig(RenderConfig):
+    """多机场景的相机设置。
+
+    **必须比单机拉远**：单机距离 1.4 m 是为了看清姿态细节，多机要看到整个
+    编队，用同样的距离只能拍到一架。仰角也更高，避免飞机互相遮挡。
+    """
+
+    distance: float = 4.2
+    elevation_deg: float = -32.0
+    azimuth_deg: float = 140.0
+
+
+def render_swarm(out_path: str | Path, *, count: int = 11,
+                 duration: float = 12.0, cfg: SwarmRenderConfig | None = None,
+                 progress: bool = True) -> Path:
+    """渲染多机编队飞行。
+
+    航线是"呼吸式"编队变化：各机沿自身径向进出，同时保持高度。这样能
+    同时展示位置环、姿态环、以及多机并存时的稳定性——比悬停不动有信息量。
+    """
+    from flightlab.swarm import SwarmLayout, SwarmSim
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not _ffmpeg_available():
+        raise RuntimeError("需要系统 ffmpeg 才能输出视频")
+
+    cfg = cfg or SwarmRenderConfig()
+    layout = SwarmLayout(count=count, radius=1.0 if count > 4 else 0.8,
+                         altitude=1.2)
+    sim = SwarmSim(layout)
+    sim.reset()
+    home = [sim.pos(i).copy() for i in range(count)]
+
+    def targets(t: float) -> list[np.ndarray]:
+        k = 0.5 * math.sin(2.0 * math.pi * t / 6.0)
+        out = []
+        for h in home:
+            r = math.hypot(h[0], h[1]) or 1.0
+            out.append(np.array([h[0] * (1.0 + k / r),
+                                 h[1] * (1.0 + k / r), 1.2]))
+        return out
+
+    renderer = mujoco.Renderer(sim.model, cfg.height, cfg.width)
+    cam = mujoco.MjvCamera()
+    mujoco.mjv_defaultCamera(cam)
+    cam.distance = cfg.distance
+    cam.elevation = cfg.elevation_deg
+    cam.azimuth = cfg.azimuth_deg
+    cam.lookat[:] = np.array([0.0, 0.0, 1.15])
+
+    steps_per_frame = max(1, int(round(1.0 / (cfg.fps * sim.dt))))
+    total_frames = int(duration * cfg.fps)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error",
+           "-f", "rawvideo", "-pix_fmt", "rgb24",
+           "-s", f"{cfg.width}x{cfg.height}", "-r", str(cfg.fps), "-i", "-",
+           "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+           "-pix_fmt", "yuv420p", str(out_path)]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    t = 0.0
+    try:
+        for i in range(total_frames):
+            for _ in range(steps_per_frame):
+                sim.step(targets(t), t)
+                t += sim.dt
+            mujoco.mj_forward(sim.model, sim.data)
+            renderer.update_scene(sim.data, camera=cam)
+            proc.stdin.write(renderer.render().tobytes())
+            if progress and i % cfg.fps == 0:
+                z = [sim.pos(k)[2] for k in range(count)]
+                print(f"  渲染 {i}/{total_frames} 帧  t={t:5.1f}s  "
+                      f"高度 {min(z):.2f}-{max(z):.2f} m", flush=True)
+    finally:
+        if proc.stdin:
+            proc.stdin.close()
+        proc.wait()
+        renderer.close()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg 退出码 {proc.returncode}")
+    return out_path
