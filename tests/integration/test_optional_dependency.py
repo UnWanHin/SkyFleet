@@ -31,7 +31,31 @@ SCENARIO = Path("skyfleet/scenarios/baseline_small.json")
 
 @contextmanager
 def matplotlib_forbidden():
-    """让 `import matplotlib` 抛 ImportError，并断言**确实被调用过**。"""
+    """让 `import matplotlib` 抛 ImportError，并断言**确实被调用过**。
+
+    ★ **必须还原 `sys.modules`**，否则会污染后续所有用到 matplotlib 的测试。
+
+    初版只删不还——删掉 `matplotlib.*` 就完事，退出时仅恢复
+    `builtins.__import__`。这留下了一颗定时炸弹：
+
+    * 删除**之前**已 import 的模块（如 `skyfleet.viz.plots`）仍然持有
+      旧的 `plt` / Figure 类对象；
+    * matplotlib 内部有**函数级** `from matplotlib.artist import Artist`
+      （就在 `cbook.normalize_kwargs` 里），模块被删后会**重新 import**，
+      于是产生一个**新的** `Artist` 类对象；
+    * 此后 `isinstance(旧 Figure 实例, 新 Artist)` 为 False，
+      `normalize_kwargs` 走错分支，报
+      `AttributeError: 'Figure' object has no attribute 'items'`——
+      一个与字体、与认证都毫无关系、极难定位的错误。
+
+    它潜伏了很久没被发现：全套测试里 `tests.integration.*` 先于
+    `tests.unit.*` 运行，而 `plots` 直到 `test_viz` 才被 import，那时旧
+    对象已经不存在，一切"恰好"自洽。直到某个测试在 discovery 阶段就
+    import 了 `plots`（模块级 import），旧对象被提前握住，炸弹才引爆。
+
+    教训：**改全局状态的测试辅助必须还原全局状态**，不能只还原自己
+    想到的那一半。
+    """
     real_import = builtins.__import__
     attempts: list[str] = []
 
@@ -50,6 +74,8 @@ def matplotlib_forbidden():
         yield attempts
     finally:
         builtins.__import__ = real_import
+        # 还原顺序无关紧要：这些模块本来就互相引用，放回原字典即可。
+        sys.modules.update(saved)
 
 
 class TestReplayDoesNotNeedMatplotlib(unittest.TestCase):
@@ -119,6 +145,66 @@ class TestDeclaredOptionalDependencies(unittest.TestCase):
         看到一段无法据以行动的 ImportError。本条防止两者漂开。
         """
         self.assertEqual(set(OPTIONAL_DEPENDENCIES), {"matplotlib"})
+
+
+class TestTheHelperRestoresGlobalState(unittest.TestCase):
+    """★ 回归：`matplotlib_forbidden()` 必须原样还原 `sys.modules`。
+
+    这条测试存在的原因是一个真实事故：初版只删不还，留下了一颗定时
+    炸弹——删除前已 import 的模块仍持有旧类对象，而 matplotlib 内部的
+    函数级 `from matplotlib.artist import Artist` 会重新 import 出**新**
+    的类，于是 `isinstance(旧 Figure, 新 Artist)` 为 False，报
+    `AttributeError: 'Figure' object has no attribute 'items'`。
+
+    那个错误与字体、与认证都毫无关系，定位成本极高。它潜伏了很久，直到
+    某个测试在 discovery 阶段就 import 了 `plots`、把旧对象提前握住才引爆。
+
+    **只还原自己想到的那一半（`builtins.__import__`）是不够的。**
+    """
+
+    def test_matplotlib_modules_are_restored(self):
+        before = {k: v for k, v in sys.modules.items()
+                  if k.split(".")[0] == "matplotlib"}
+        self.assertTrue(before, "本测试需要 matplotlib 已导入才有意义")
+        with matplotlib_forbidden():
+            during = [k for k in sys.modules if k.split(".")[0] == "matplotlib"]
+            self.assertEqual(during, [],
+                             "context 内 matplotlib 仍可 import，封锁无效")
+        after = {k: v for k, v in sys.modules.items()
+                 if k.split(".")[0] == "matplotlib"}
+        self.assertEqual(set(after), set(before),
+                         "离开 context 后模块没有还原——后续测试会拿到"
+                         "与旧对象不兼容的新类")
+
+    def test_class_identity_survives_the_context(self):
+        """★ 类对象身份必须不变。
+
+        这是事故的真正症状：模块还原了但换了对象，一样会炸。
+        """
+        import matplotlib.artist as artist_mod
+        original = artist_mod.Artist
+        with matplotlib_forbidden():
+            pass
+        import matplotlib.artist as reloaded
+        self.assertIs(reloaded.Artist, original,
+                      "重新 import 得到了新的 Artist 类对象——"
+                      "旧的 Figure 实例将不再 isinstance 新类")
+
+    def test_figures_can_be_created_after_the_context(self):
+        """★ 端到端：离开 context 后仍能正常建图。
+
+        前两条测的是机制，这条测的是**用户可见的结果**。事故的表现形式
+        就是建图抛 AttributeError。
+        """
+        import matplotlib.pyplot as plt
+        with matplotlib_forbidden():
+            pass
+        fig, ax = plt.subplots(figsize=(2.0, 2.0))
+        try:
+            ax.plot([0, 1], [0, 1])
+            ax.set_title("after context")
+        finally:
+            plt.close(fig)
 
 
 class TestCliMessageMatchesReality(unittest.TestCase):

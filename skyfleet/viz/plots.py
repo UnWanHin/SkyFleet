@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
@@ -42,8 +43,33 @@ STATE_COLOUR = {"DELIVERED": "#1e8449", "PICKED": "#2471a3",
                 "EXPIRED": "#566573"}
 
 
+class _DropVariableFontWeightWarning(logging.Filter):
+    """静音「可变字体找不到 normal 字重」这条**无害**警告。
+
+    根因：`NotoSansCJK-VF.ttc` 是**可变字体**（VF = Variable Font），
+    字体集合里只有一个条目、`weight` 被登记为 100（Thin 实例）。代码要
+    的是 `normal`（400），于是 matplotlib 每次 set 字体都记一条
+    「Failed to find font weight normal for Noto Sans CJK SC, now using 100」。
+
+    **字形是正常渲染出来的**——用的是同一字族可变字体的默认实例，中文
+    显示无误。但首次运行的人看到四行 `findfont: Failed to...` 会以为
+    字体装坏了或图出不来，实际上只是元数据登记方式不同。
+
+    只过滤这一条消息：真正的「找不到字族」仍会照常报出来，否则缺字体
+    这种**真问题**会被一起吞掉，症状变成"图上全是方框却没有任何提示"。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        is_weight = ("Failed to find font weight" in msg
+                     and any(name in msg for name in _CJK_CANDIDATES))
+        return not is_weight
+
+
 def _use_cjk_font() -> bool:
     available = {f.name for f in font_manager.fontManager.ttflist}
+    logging.getLogger("matplotlib.font_manager").addFilter(
+        _DropVariableFontWeightWarning())
     for name in _CJK_CANDIDATES:
         if name in available:
             plt.rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
