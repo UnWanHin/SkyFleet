@@ -1,0 +1,93 @@
+<mujoco model="quadrotor_x">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4"
+          density="0" viscosity="0"/>
+
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <quality shadowsize="2048"/>
+  </visual>
+
+  <asset>
+    <texture name="sky" type="skybox" builtin="gradient"
+             rgb1=".25 .35 .5" rgb2=".75 .82 .9" width="512" height="3072"/>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512"
+             rgb1=".32 .36 .40" rgb2=".26 .30 .34"/>
+    <material name="ground" texture="grid" texrepeat="30 30" reflectance=".05"/>
+    <material name="arm"   rgba=".15 .15 .17 1"/>
+    <material name="body"  rgba=".85 .25 .15 1"/>
+    <material name="rotor" rgba=".20 .75 .45 .85"/>
+    <material name="marker" rgba=".95 .80 .15 1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 8" dir="0 0 -1" directional="true" castshadow="true"
+           diffuse=".8 .8 .8" specular=".2 .2 .2"/>
+    <geom name="ground" type="plane" size="80 80 .1" material="ground"/>
+
+    <!-- 目标航点标记（由 Python 移动） -->
+    <body name="target" pos="0 0 1.5" mocap="true">
+      <geom type="sphere" size=".08" material="marker" mass="0" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- ===== 四旋翼 ===== -->
+    <body name="drone" pos="0 0 0.02">
+      <freejoint name="root"/>
+      <!-- 机身 -->
+      <geom name="hull" type="box" size=".055 .055 .018" material="body"
+            mass="0.020"/>
+      <!-- 四条机臂（X 型） -->
+      <geom name="arm0" type="capsule" fromto="0 0 0  .11  .11 0"
+            size=".006" material="arm" mass="0.0015"/>
+      <geom name="arm1" type="capsule" fromto="0 0 0 -.11 -.11 0"
+            size=".006" material="arm" mass="0.0015"/>
+      <geom name="arm2" type="capsule" fromto="0 0 0  .11 -.11 0"
+            size=".006" material="arm" mass="0.0015"/>
+      <geom name="arm3" type="capsule" fromto="0 0 0 -.11  .11 0"
+            size=".006" material="arm" mass="0.0015"/>
+      <!-- 起落架 -->
+      <geom type="capsule" fromto=" .04 0 -.018  .04 0 -.055" size=".004"
+            material="arm" mass="0.0005"/>
+      <geom type="capsule" fromto="-.04 0 -.018 -.04 0 -.055" size=".004"
+            material="arm" mass="0.0005"/>
+
+      <!-- ★ 四个电机：真实 hinge 关节 + 转动惯量，由力矩驱动 -->
+      <body name="rotor0" pos=" .11  .11 0">
+        <joint name="motor0" type="hinge" axis="0 0 1" armature="1.0e-7"
+               damping="2.0e-8" frictionloss="1.0e-9"/>
+        <geom type="cylinder" size=".045 .003" material="rotor" mass="0.0004"/>
+        <site name="thrust0" pos="0 0 0" size=".01"/>
+      </body>
+      <body name="rotor1" pos="-.11 -.11 0">
+        <joint name="motor1" type="hinge" axis="0 0 1" armature="1.0e-7"
+               damping="2.0e-8" frictionloss="1.0e-9"/>
+        <geom type="cylinder" size=".045 .003" material="rotor" mass="0.0004"/>
+        <site name="thrust1" pos="0 0 0" size=".01"/>
+      </body>
+      <body name="rotor2" pos=" .11 -.11 0">
+        <joint name="motor2" type="hinge" axis="0 0 -1" armature="1.0e-7"
+               damping="2.0e-8" frictionloss="1.0e-9"/>
+        <geom type="cylinder" size=".045 .003" material="rotor" mass="0.0004"/>
+        <site name="thrust2" pos="0 0 0" size=".01"/>
+      </body>
+      <body name="rotor3" pos="-.11  .11 0">
+        <joint name="motor3" type="hinge" axis="0 0 -1" armature="1.0e-7"
+               damping="2.0e-8" frictionloss="1.0e-9"/>
+        <geom type="cylinder" size=".045 .003" material="rotor" mass="0.0004"/>
+        <site name="thrust3" pos="0 0 0" size=".01"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- ★ 四个电机力矩指令（真正的 4 路控制输入） -->
+  <actuator>
+    <motor name="cmd0" joint="motor0" gear="1" ctrllimited="true"
+           ctrlrange="0 1.2e-2"/>
+    <motor name="cmd1" joint="motor1" gear="1" ctrllimited="true"
+           ctrlrange="0 1.2e-2"/>
+    <motor name="cmd2" joint="motor2" gear="1" ctrllimited="true"
+           ctrlrange="0 1.2e-2"/>
+    <motor name="cmd3" joint="motor3" gear="1" ctrllimited="true"
+           ctrlrange="0 1.2e-2"/>
+  </actuator>
+</mujoco>
