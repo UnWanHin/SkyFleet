@@ -40,3 +40,9 @@ WARNING Tue Nov  3 10:35:42 2026: Nan, Inf or huge value in QVEL at DOF 3. The s
 
 WARNING Tue Nov  3 10:39:13 2026: Nan, Inf or huge value in QACC at DOF 6. The simulation is unstable. Time = 19.5980.
 
+WARNING Tue Nov  3 11:43:54 2026: Nan, Inf or huge value in CTRL at ACTUATOR 0. The simulation is unstable. Time = 0.0000.
+
+WARNING Tue Nov  3 11:43:54 2026: Nan, Inf or huge value in CTRL at ACTUATOR 0. The simulation is unstable. Time = 0.0000.
+
+WARNING Tue Nov  3 11:43:54 2026: Nan, Inf or huge value in CTRL at ACTUATOR 0. The simulation is unstable. Time = 0.0000.
+

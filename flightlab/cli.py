@@ -184,6 +184,14 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--altitude", type=float, default=1.2)
     v.set_defaults(func=_cmd_view)
 
+    g = sub.add_parser("gcs", help="指令台：实时遥测 + 键盘发指令")
+    g.add_argument("--duration", type=float, default=600.0, help="最长运行秒数")
+    g.add_argument("--hz", type=float, default=20.0, help="遥测刷新频率 Hz")
+    g.add_argument("--view", action="store_true", help="同时开 3D 窗口")
+    g.add_argument("--command-interval", type=float, default=0.0,
+                   help="两条指令的最小间隔 s；管道喂脚本时用它给飞机留出飞行时间")
+    g.set_defaults(func=_cmd_gcs)
+
     w = sub.add_parser("swarm", help="多机编队飞行并打印指标")
     w.add_argument("-n", "--count", type=int, default=11, help="机数")
     w.add_argument("--duration", type=float, default=10.0)
@@ -213,6 +221,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="阶跃方向（默认 x：水平机动才暴露姿态环）")
     t.set_defaults(func=_cmd_tune)
     return p
+
+
+def _cmd_gcs(args) -> int:
+    """指令台：把遥测打到终端，从 stdin 读指令。"""
+    from flightlab.gcs import run_interactive
+
+    run_interactive(duration=args.duration, telemetry_hz=args.hz,
+                    command_interval=args.command_interval, view=args.view)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
