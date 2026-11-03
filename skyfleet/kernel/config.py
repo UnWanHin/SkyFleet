@@ -107,6 +107,14 @@ class SimConfig:
     #: 对抗注入：[{"kind": ..., "t": ...}, ...]，见 sim/adversary.py
     adversary: tuple[dict, ...] = ()
 
+    #: 用 MuJoCo 刚体积分执行航线，而不是按速度直线前进。
+    #:
+    #: 默认 False：`out/study/` 下 14 个扫参的结论全部建立在运动学模型的
+    #: 速度与确定性之上，换成物理积分会让它们不可复现。开启后位置来自
+    #: 真实动力学（有加减速、滞后、冲过头），代价是 11 机 600 s 场景从
+    #: 约 5 s 增到约 63 s（本机一次测量，随负载变化）。用于验证通信与飞行耦合。
+    physics_movers: bool = False
+
     # 协议节奏
     heartbeat_period: float = 1.0
     telemetry_period: float = 0.5

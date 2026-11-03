@@ -122,6 +122,9 @@ class Gains:
     #: 水平加速度指令限幅 m/s²。tan⁻¹(3/9.81)=17°，留足姿态环的跟踪余量，
     #: 也保证所需总推力远低于上限。
     a_max_horizontal: float = 3.0
+    #: 垂直指令限幅 m/s²。下界必须大于 -g：若 a_z < -g，期望推力
+    #: 指向地面，混控只能截成零推力；巡航转下降时会丢失姿态控制权。
+    a_max_vertical: float = 7.0
 
     # 姿态环（机体系，输出力矩）
     #: ωn=15，由 I_yy≈5.1e-5 kg·m² 反推：k_R=I·ωn²、k_ω=2ζI·ωn。
@@ -202,6 +205,9 @@ class CascadeController:
         if norm > g.a_max_horizontal:
             a = a.copy()
             a[:2] = a_h / norm * g.a_max_horizontal
+        # Keep commanded thrust above zero even when a distant lower waypoint
+        # is selected during fast horizontal cruise.
+        a[2] = np.clip(a[2], -g.a_max_vertical, g.a_max_vertical)
         return a, v_ref
 
     # ---- 姿态环 ----

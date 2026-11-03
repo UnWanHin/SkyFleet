@@ -44,7 +44,7 @@ from skyfleet.world.impairment import wrap_with_impairments
 from skyfleet.world.link import LinkModel, build_link_model
 from skyfleet.world.position import build_position_source
 from skyfleet.world.power import build_energy_model
-from skyfleet.world.mobility import WaypointMover
+from skyfleet.world.flight_mover import build_mover
 from skyfleet.world.node import Node
 
 # 事件类型（调度器键，非日志枚举）
@@ -300,7 +300,8 @@ class Engine:
             agent = NodeAgent(node, cfg, self.identity, self.rngs, None, self)
             agent.position = self.position_source
             self.agents[node.node_id] = agent
-            self.movers[node.node_id] = WaypointMover(node, node.speed)
+            self.movers[node.node_id] = build_mover(
+                node, node.speed, physics=cfg.physics_movers)
 
         self.leader = LeaderController(
             cfg, self.board, self.agents[cfg.leader_id].membership,
@@ -533,7 +534,10 @@ class Engine:
         if not agent.alive:
             return
         t = ev.t
-        agent.on_telemetry_tick(t)
+        mover = self.movers[agent.node.node_id]
+        flight = (mover.flight_telemetry()
+                  if self.config.physics_movers else None)
+        agent.on_telemetry_tick(t, flight=flight)
         if agent.node.node_id != self.leader_id:
             self._observe_link(agent, t)
         self._maybe_elect(t)
@@ -703,7 +707,9 @@ class Engine:
             # 只有**整条航线走完**才算抵达任务点。航线含巡航转场点，
             # 若把"到达任意一个航点"当成抵达，无人机会在巡航高度上
             # 直接开始投递，永远不下降进入峡谷。
-            if mover.arrived:
+            if (mover.arrived and
+                    self._last_actuated.get(node_id, SafetyAction.NONE)
+                    is SafetyAction.NONE):
                 self._advance_mission(node_id, t)
 
         self._sample_countdown += 1
@@ -1244,7 +1250,10 @@ class Engine:
             t_queue=round(queue_wait, 9),
             t_access=round(attempt.t_access, 9),
             t_tx=round(attempt.t_tx, 9),
-            t_prop=round(attempt.t_prop, 9))
+            t_prop=round(attempt.t_prop, 9),
+            **({"flight": msg.payload["flight"]}
+               if self.config.physics_movers and msg.msg_type == "TELEMETRY"
+               and "flight" in msg.payload else {}))
 
     def _forward(self, msg: Msg, relay: NodeAgent, t: float) -> None:
         assert self.log is not None

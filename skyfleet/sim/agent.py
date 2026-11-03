@@ -131,10 +131,10 @@ class NodeAgent:
         target = dst if dst is not None else self.leader_id
         return self.submit(self._heartbeat(t, target), t)
 
-    def on_telemetry_tick(self, t: float) -> bool:
+    def on_telemetry_tick(self, t: float, flight: dict | None = None) -> bool:
         if not self.alive:
             return False
-        return self.submit(self._telemetry(t), t)
+        return self.submit(self._telemetry(t, flight), t)
 
     def _heartbeat(self, t: float, dst: str) -> Msg:
         return Msg.new(
@@ -147,7 +147,10 @@ class NodeAgent:
             payload={"pos": list(self.node.pos), "energy": self.node.energy,
                      "nearby": self.nearby(t)})
 
-    def _telemetry(self, t: float) -> Msg:
+    def _telemetry(self, t: float, flight: dict | None = None) -> Msg:
+        payload = {"pos": list(self.node.pos), "energy": self.node.energy}
+        if flight is not None:
+            payload["flight"] = flight
         return Msg.new(
             "TELEMETRY", src=self.node.node_id, dst=self.leader_id,
             t=t, msg_id=self.new_msg_id(), seq=self.next_seq("TELEMETRY"),
@@ -155,7 +158,7 @@ class NodeAgent:
             leader_epoch=self.leader_epoch,
             mission_version=self.mission_version,
             route_version=self.routing.route_version,
-            payload={"pos": list(self.node.pos), "energy": self.node.energy})
+            payload=payload)
 
     def nearby(self, t: float) -> list[str]:
         """最近仍能直接听到的节点——这是"邻居间接探测"的证据来源。
