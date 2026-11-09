@@ -20,7 +20,8 @@ from skyfleet.protocol.message import Msg, Rel
 
 #: 时效性指令：过了有效期就不该再被执行。心跳/遥测/ACK 迟到不影响
 #: 正确性，一律拒绝反而平白降低可达性，因此不在此列。
-TIMELY_ORDERS = frozenset({"TASK_ASSIGN", "TASK_REASSIGN"})
+TIMELY_ORDERS = frozenset({"TASK_ASSIGN", "TASK_REASSIGN",
+                           "FLIGHT_CORRECTION"})
 from skyfleet.protocol.membership import MembershipParams, MembershipView
 from skyfleet.protocol.queue import RateLimiter, SendQueue
 from skyfleet.protocol.reliability import ReliabilityManager

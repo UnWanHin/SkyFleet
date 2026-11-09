@@ -42,6 +42,7 @@ MSG_TYPES: dict[str, tuple[Qos, Rel]] = {
     "ROUTE_UPDATE": (Qos.Q2, Rel.R1),
     "JOIN_REQUEST": (Qos.Q2, Rel.R1),
     "TELEMETRY": (Qos.Q3, Rel.R0),
+    "FLIGHT_CORRECTION": (Qos.Q1, Rel.R2),
     "BULK": (Qos.Q4, Rel.R0),
 }
 
@@ -61,6 +62,7 @@ DEADLINE_BY_REL: dict[Rel, float] = {
 #: §2.2.1"不得把单次丢包等同于故障"的初衷。
 MISSION_SCOPED: frozenset[str] = frozenset({
     "TASK_ASSIGN", "TASK_REASSIGN", "DELIVERY_CONFIRM",
+    "FLIGHT_CORRECTION",
 })
 
 _DEFAULT_TTL = 8

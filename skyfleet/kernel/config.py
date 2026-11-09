@@ -114,6 +114,9 @@ class SimConfig:
     #: 真实动力学（有加减速、滞后、冲过头），代价是 11 机 600 s 场景从
     #: 约 5 s 增到约 63 s（本机一次测量，随负载变化）。用于验证通信与飞行耦合。
     physics_movers: bool = False
+    #: 指令台限速触发阈值：最大电机转速与 omega_max 的比值。
+    #: 仅在物理运动开启时生效；设为 0 可关闭远程修正。
+    motor_guard_ratio: float = 0.8
 
     # 协议节奏
     heartbeat_period: float = 1.0

@@ -92,6 +92,16 @@ class FlightlabMover:
             sim.step(sim.target, 0.0)
         self.node.pos = tuple(float(v) for v in sim.pos)
 
+    def limit_cruise(self, speed: float) -> None:
+        """Apply a bounded remote cruise limit without changing motor gains."""
+        if not 0.0 < speed <= min(self.speed, V_MAX):
+            return
+        sim = self._ensure_sim()
+        from dataclasses import replace
+
+        gains = replace(sim.gains, v_max=speed)
+        sim.gains = sim.controller.gains = sim.esc.gains = gains
+
     def flight_telemetry(self) -> dict | None:
         """Return physical measurements only after the simulator starts."""
         if not self._ready:
@@ -100,6 +110,7 @@ class FlightlabMover:
         parked = (not self.route and
                   sum(v * v for v in sim.vel) <= SETTLE_SPEED ** 2)
         return {"pos": [float(v) for v in sim.pos],
+                "v_max": float(sim.gains.v_max),
                 "vel": ([0.0, 0.0, 0.0] if parked else
                         [float(v) for v in sim.vel]),
                 "rotor_rad_s": [float(v) for v in sim.rotor_speeds()]}

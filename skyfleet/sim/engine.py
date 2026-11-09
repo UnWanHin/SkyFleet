@@ -274,6 +274,7 @@ class Engine:
                 "所有消息都会验签失败（集群会静默瘫痪）。"
                 "请设置 auth_key，或关闭 auth_enabled。")
         self._sample_countdown = 0
+        self._last_flight_correction: dict[str, float] = {}
 
     # ================= 构建 =================
 
@@ -636,6 +637,12 @@ class Engine:
         # `_handle_delivery_confirm` 调用次数为 0，完成率 0.000。
         self.agents[old_id].handlers.pop("DELIVERY_CONFIRM", None)
         new_agent.handlers["DELIVERY_CONFIRM"] = self._handle_delivery_confirm
+        if self.config.physics_movers:
+            self.agents[old_id].handlers.pop("TELEMETRY", None)
+            self.agents[old_id].handlers[
+                "FLIGHT_CORRECTION"] = self._handle_flight_correction
+            new_agent.handlers.pop("FLIGHT_CORRECTION", None)
+            new_agent.handlers["TELEMETRY"] = self._handle_flight_telemetry
         # 主节点巡检（EV_LEADER_CHECK）此前只在**初始**主节点上排程，
         # 新主节点从不会被排到，于是 `assign_pending` / `_sync_assignments`
         # / `_check_safety` 全部停摆——任务派出去却永远不会被标记完成，
@@ -1071,6 +1078,8 @@ class Engine:
         if previous is SafetyAction.NONE:
             self._safety_saved_route[node_id] = list(mover.route)
         self._last_actuated[node_id] = action
+        if self.config.physics_movers and action is SafetyAction.RETURN:
+            mover.limit_cruise(min(mover.speed, 12.0))
         if action is SafetyAction.RETURN:
             home = self._home.get(node_id)
             mover.set_route([home] if home is not None else [])
@@ -1423,10 +1432,83 @@ class Engine:
 
     # ================= 供主节点处理器接线 =================
 
+    def _handle_flight_telemetry(self, msg: Msg, t: float,
+                                 quality: float) -> None:
+        if (not self.config.physics_movers or
+                self.config.motor_guard_ratio <= 0.0 or
+                t - msg.t_created > self.config.telemetry_period or
+                msg.src == self.leader_id):
+            return
+        flight = msg.payload.get("flight")
+        mover = self.movers.get(msg.src)
+        if not isinstance(flight, dict) or mover is None:
+            return
+        from flightlab.params import DEFAULT as params
+
+        motors = flight.get("rotor_rad_s")
+        if (not 0.0 < self.config.motor_guard_ratio <= 1.0 or
+                not isinstance(motors, list) or len(motors) != 4 or
+                not all(isinstance(w, (int, float)) and math.isfinite(w)
+                        for w in motors)):
+            return
+        if min(motors) < 0.0:
+            return
+        reported_limit = flight.get("v_max")
+        if not isinstance(reported_limit, (int, float)) or not math.isfinite(reported_limit):
+            return
+        cruise = min(self.config.node_speed, 12.0)
+        if cruise <= 0.0:
+            return
+        peak = max(motors) / params.omega_max
+        if peak >= self.config.motor_guard_ratio:
+            speed = min(cruise, 6.0)
+        elif peak <= self.config.motor_guard_ratio * 0.7:
+            speed = cruise
+        else:
+            return
+        if abs(reported_limit - speed) < 1e-6:
+            return
+        if t - self._last_flight_correction.get(msg.src, -math.inf) < 2.0:
+            return
+        leader = self.agents[self.leader_id]
+        command = Msg.new(
+            "FLIGHT_CORRECTION", src=self.leader_id, dst=msg.src, t=t,
+            msg_id=leader.new_msg_id(), seq=leader.next_seq("FLIGHT_CORRECTION"),
+            session_id=leader.session_id, leader_epoch=leader.leader_epoch,
+            mission_version=self.leader.mission_version,
+            route_version=leader.routing.route_version,
+            payload={"v_max": speed})
+        if leader.submit(command, t):
+            self._last_flight_correction[msg.src] = t
+
+    def _handle_flight_correction(self, msg: Msg, t: float,
+                                  quality: float) -> None:
+        if msg.src != self.leader_id or not self.config.physics_movers:
+            return
+        node_id = msg.dst
+        if (self._last_actuated.get(node_id, SafetyAction.NONE)
+                is not SafetyAction.NONE or node_id in self.grounded):
+            return
+        speed = msg.payload.get("v_max")
+        if (not isinstance(speed, (int, float)) or not math.isfinite(speed)):
+            return
+        mover = self.movers[node_id]
+        if not 0.0 < float(speed) <= min(mover.speed, 12.0):
+            return
+        if mover._ready and abs(float(speed) - mover._sim.gains.v_max) < 1e-6:
+            return
+        mover.limit_cruise(float(speed))
+
     def wire_leader_handlers(self) -> None:
         self.agents[self.config.leader_id].handlers[
             "DELIVERY_CONFIRM"] = self._handle_delivery_confirm
+        if self.config.physics_movers:
+            self.agents[self.config.leader_id].handlers[
+                "TELEMETRY"] = self._handle_flight_telemetry
         for node_id in self.agents:
             if node_id != self.config.leader_id:
                 self.agents[node_id].handlers["ACK"] = \
                     self._make_ack_handler(node_id)
+                if self.config.physics_movers:
+                    self.agents[node_id].handlers[
+                        "FLIGHT_CORRECTION"] = self._handle_flight_correction

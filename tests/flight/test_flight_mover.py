@@ -235,6 +235,72 @@ class TestPhysicalTelemetry(unittest.TestCase):
                                - min(p[0] for p in positions), 0.1)
 
 
+class TestRemoteCorrection(unittest.TestCase):
+    def test_hover_overrides_station_correction(self):
+        import tempfile
+        from pathlib import Path
+        from skyfleet.kernel.config import SimConfig
+        from skyfleet.observe.log import read_log
+        from skyfleet.sim.engine import Engine
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = SimConfig(seed=7, duration=9.0, slaves=2, relays=0,
+                            tasks=2, blocks=2, area=400.0,
+                            physics_movers=True, motor_guard_ratio=0.5,
+                            gnss_outages=(("S1", 4.0, 12.0),),
+                            log_path=str(Path(tmp) / "hover.jsonl"))
+            engine = Engine(cfg)
+            engine.run()
+            events = list(read_log(cfg.log_path))
+            self.assertTrue(any(e["kind"] == "SAFETY_ACTION"
+                                and e.get("node_id") == "S1"
+                                and e.get("action") == "HOVER"
+                                and e.get("actuated") for e in events))
+            self.assertEqual(engine.movers["S1"].route, [])
+            self.assertLess(math.hypot(*engine.movers["S1"]._sim.vel[:2]), 1.0)
+
+    def test_station_correction_changes_actual_trajectory(self):
+        import tempfile
+        from pathlib import Path
+        from skyfleet.kernel.config import SimConfig
+        from skyfleet.sim.engine import Engine
+
+        with tempfile.TemporaryDirectory() as tmp:
+            positions = []
+            for ratio in (0.0, 0.5):
+                cfg = SimConfig(seed=7, duration=8.0, slaves=2, relays=0,
+                                tasks=2, blocks=2, area=400.0,
+                                physics_movers=True, motor_guard_ratio=ratio,
+                                log_path=str(Path(tmp) / f"{ratio}.jsonl"))
+                engine = Engine(cfg)
+                engine.run()
+                positions.append(engine.nodes["S1"].pos)
+            self.assertGreater(math.dist(*positions), 2.0)
+
+    def test_received_motor_load_causes_station_command_and_physical_slowdown(self):
+        import tempfile
+        from pathlib import Path
+        from skyfleet.kernel.config import SimConfig
+        from skyfleet.observe.log import read_log
+        from skyfleet.sim.engine import Engine
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = SimConfig(seed=7, duration=8.0, slaves=2, relays=0,
+                            tasks=2, blocks=2, area=400.0,
+                            physics_movers=True, motor_guard_ratio=0.5,
+                            log_path=str(Path(tmp) / "correction.jsonl"))
+            engine = Engine(cfg)
+            engine.run()
+            events = list(read_log(cfg.log_path))
+            received = [e for e in events if e["kind"] == "MSG_RX"
+                        and e.get("msg_type") == "FLIGHT_CORRECTION"
+                        and e["node_id"] == "S1"]
+            self.assertTrue(received, "No correction returned over the channel")
+            mover = engine.movers["S1"]
+            self.assertLess(mover._sim.gains.v_max, mover.speed)
+            self.assertGreater(mover.node.pos[0], 0)
+
+
 class TestVerticalTransition(unittest.TestCase):
     def test_horizontal_cruise_then_descent_keeps_rotors_bounded(self):
         """Cruise-to-delivery transition must retain motor authority."""
