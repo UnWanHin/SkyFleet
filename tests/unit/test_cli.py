@@ -19,6 +19,15 @@ def write_config(tmpdir, **overrides):
     return str(path)
 
 
+class TestLiveBindOptions(unittest.TestCase):
+    def test_live_defaults_to_loopback_and_accepts_container_bind(self):
+        from skyfleet.cli import build_parser
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["live"]).host, "127.0.0.1")
+        self.assertEqual(parser.parse_args(["live", "--host", "0.0.0.0"]).host,
+                         "0.0.0.0")
+
+
 class TestRunCommand(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

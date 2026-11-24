@@ -11,7 +11,20 @@
 
 ---
 
-### 报告章节的构建（交付物）
+## Docker 一键城市演示
+
+```bash
+podman build -t skyfleet:urban .
+podman run --rm --name skyfleet -p 127.0.0.1:8765:8765 \
+  -v skyfleet-out:/app/out skyfleet:urban
+# 浏览 http://127.0.0.1:8765/，选择 S4 → (100,20,30) 派遣
+```
+
+Docker 用户把 `podman` 换成 `docker`。鏡像內建 ns-3.46 bridge 與 MuJoCo 物理仿真，瀏覽器版不開啟原生桌面視窗。預建鏡像發布後，可直接 `podman pull IMAGE` 並把上述運行命令的鏡像名替換為 `IMAGE`；本倉庫未預設外部鏡像地址。詳見 [Docker 使用演示、技術棧與 L/R/S 通訊說明](docs/docker-demo.md)。
+
+---
+
+### 報告章節的構建（交付物）
 
 `docs/report/2026-10-04-results-chapter.html` 的**数字是生成的，不是手抄的**：
 

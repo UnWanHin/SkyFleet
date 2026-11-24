@@ -70,6 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--city", default=None)
     live.add_argument("--duration", type=float, default=None)
     live.add_argument("--port", type=int, default=8765)
+    live.add_argument("--host", default="127.0.0.1",
+                      help="HTTP listen address; use 0.0.0.0 inside a container")
     live.add_argument("--tick-seconds", type=float, default=0.1)
     live.add_argument("--viewer", choices=("web", "mujoco"), default="web",
                       help="mujoco: native live 3D window; web: 2D status page")
@@ -194,7 +196,7 @@ def _cmd_live(args) -> int:
     config = replace(base, log_path=args.log,
                      city_geojson=args.city or base.city_geojson,
                      duration=args.duration or base.duration)
-    serve_live(config, port=args.port, tick_seconds=args.tick_seconds,
+    serve_live(config, host=args.host, port=args.port, tick_seconds=args.tick_seconds,
                viewer=args.viewer)
     return 0
 

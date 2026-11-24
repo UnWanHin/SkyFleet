@@ -1,0 +1,13 @@
+.git
+.venv
+.build
+out
+__pycache__
+*.pyc
+*.pyo
+*.docx
+MUJOCO_LOG.TXT
+tests
+docs
+README.md
+start.sh
