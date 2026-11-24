@@ -72,6 +72,38 @@ points follow the active adaptive matrix target (spacing 3 m); the gray
 skeleton and deviation vectors are visual guides only, with no effect on the
 MuJoCo flight state, ns-3 clock, or routing.
 
+## Read-only network visualization
+
+In the live native viewer, press `V` to show/hide the modeled altitude-plane
+LoS/NLoS coverage; the web Mini-Map has its own coverage checkbox. Its source
+is L by default, or the single selected relay/drone. Grid cells are bounded
+(24×20) and recalculated at most every 2 simulation seconds unless the source
+moves two metres or the selection changes. Green means modeled power above
+−75 dBm with geometric LoS; dark red means intersecting building volume;
+gray means unobstructed but modeled weak. The grid uses the active scene's
+buildings (including `d5_urban_city.geojson` when configured), 25 dBm TX and
+the same LogDistance exponent 2 / configured building loss as the ns-3 bridge.
+This is an illustrative model estimate, neither measured PHY RSSI nor proven
+packet delivery. The native scene reserves a hard upper bound of 256 user
+geometry objects, and pulse dots are prioritized before coverage tiles.
+
+The cyan packet pulses are per **actual accepted ns-3 hop reception**;
+magenta represents uplink, and red flashes mark a unicast `DONE` expiry at
+its handoff sender. A send call is MAC handoff, not proof of RF emission, and
+an expiry does not locate the actual RF failure, so drop flashes do not claim
+a building-intersection position. Pulses animate along that hop's handoff
+sender position and reception endpoint position; each received hop is recorded
+independently (no interpolated, unobserved route). The timeline is bounded to
+128 events / 3 simulation seconds, drawn with a maximum of 32 moving dots.
+The logical tree shows current protocol upstream choices and briefly marks
+handover; it is separate from reception-inferred candidate reachability.
+The 30-second Canvas chart shows cumulative **unicast-hop** PDR
+(successfully received unicast handoffs / completed unicast handoffs,
+excluding in-flight handoffs and broadcasts), accepted-message
+cumulative mean end-to-end delay and the number of recent observed undirected
+successful-hop pairs. The graph window slides over simulation time; metric
+averages are cumulative, not window-recomputed.
+
 ## Run
 
 ```bash

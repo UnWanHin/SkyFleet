@@ -11,6 +11,142 @@ from skyfleet.sim.live_control import LiveController
 
 
 class TestLiveControl(unittest.TestCase):
+    def test_packet_flow_real_hops_and_expiry(self):
+        from skyfleet.protocol.message import Msg
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = SimConfig(slaves=1, relays=1, tasks=0, blocks=1,
+                            network_backend="ns3", log_path=str(Path(folder) / "flow.jsonl"))
+            engine = Engine(cfg).build()
+            control = LiveController(engine, tick_seconds=0)
+            control.start_radio_observation()
+            control.packet_observer("p1", Msg.new("TASK_ASSIGN", "L", "S1", .1), "L", "R1", .1, None)
+            control.packet_observer("p1", Msg.new("TASK_ASSIGN", "L", "S1", .1), "L", "R1", .1, .107)
+            control.packet_observer("p2", Msg.new("TASK_ASSIGN", "L", "S1", .1), "R1", "S1", .11, None)
+            control.packet_observer("p2", Msg.new("TASK_ASSIGN", "L", "S1", .1), "R1", "S1", .11, .12)
+            control.packet_observer("p3", Msg.new("TELEMETRY", "S1", "L", .2), "S1", "R1", .2, None)
+            control.packet_observer("p3", Msg.new("TELEMETRY", "S1", "L", .2), "S1", "R1", .2, .21)
+            control.packet_observer("p4", Msg.new("TASK_ASSIGN", "L", "S1", .3), "R1", "S1", .3, None)
+            control.packet_observer("p4", Msg.new("TASK_ASSIGN", "L", "S1", .3), "R1", "S1", .3, -1.4)
+            control.tick(engine, 1.5)
+            flow = control.snapshot["packet_flow"]
+            self.assertEqual([event["type"] for event in flow],
+                             ["DOWNLINK", "DOWNLINK", "UPLINK", "DROP"])
+            self.assertEqual([(event["src"], event["dst"]) for event in flow[:2]],
+                             [("L", "R1"), ("R1", "S1")])
+            self.assertAlmostEqual(flow[-1]["at"], 1.4)
+            self.assertEqual(flow[-1]["position"], list(engine.nodes["R1"].pos))
+            self.assertEqual(control.snapshot["network"]["pdr_percent"], 75.)
+            self.assertEqual(control.snapshot["network"]["pdr_scope"], "completed_unicast_hops")
+
+    def test_pdr_excludes_broadcast_and_inflight_attempts(self):
+        from skyfleet.protocol.message import Msg
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = SimConfig(slaves=1, relays=0, tasks=0, blocks=1,
+                            network_backend="ns3", log_path=str(Path(folder) / "pdr.jsonl"))
+            engine = Engine(cfg).build()
+            control = LiveController(engine, tick_seconds=0)
+            down = Msg.new("TASK_ASSIGN", "L", "S1", .1)
+            broadcast = Msg.new("HEARTBEAT", "L", "*", .2)
+            control.packet_observer("pending", down, "L", "S1", .1, None)
+            control.packet_observer("broadcast", broadcast, "L", "*", .2, None)
+            control.packet_observer("broadcast", broadcast, "L", "S1", .2, .21)
+            control.tick(engine, .22)
+            self.assertIsNone(control.snapshot["network"]["pdr_percent"])
+            self.assertEqual(control.snapshot["network"]["unicast_in_flight"], 1)
+            control.packet_observer("pending", down, "L", "S1", .1, -.5)
+            control.tick(engine, .5)
+            self.assertEqual(control.snapshot["network"]["pdr_percent"], 0.)
+
+    def test_bridge_events_feed_packet_observer_without_extra_steps(self):
+        from skyfleet.protocol.message import Msg
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = SimConfig(slaves=1, relays=0, tasks=0, blocks=1,
+                            network_backend="ns3", log_path=str(Path(folder) / "bridge.jsonl"))
+            engine = Engine(cfg).build()
+            control = LiveController(engine, tick_seconds=0)
+            control.start_radio_observation()
+            class Radio:
+                now = 0.
+                def position(self, *args): pass
+                def send(self, *args): pass
+                def advance(self, t):
+                    self.now = t
+                    return [{"id": "p1", "dst": "S1", "t": t-.01,
+                             "modeled_rx_dbm": -54.}]
+            engine._ns3 = Radio()
+            engine.log = EventLog(cfg.log_path)
+            msg = Msg.new("TASK_ASSIGN", "L", "S1", .1)
+            engine._ns3_transmit(msg, engine.agents["L"], .1)
+            engine._ns3_advance(.12)
+            control.tick(engine, .12)
+            self.assertEqual(control.snapshot["packet_flow"][0]["type"], "DOWNLINK")
+            self.assertEqual(control.snapshot["packet_flow"][0]["src"], "L")
+            self.assertEqual(control.snapshot["network"]["pdr_percent"], 100.)
+            engine.log.close()
+
+    def test_routing_history_window_and_handover(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = SimConfig(slaves=1, relays=1, tasks=0, blocks=1,
+                            network_backend="ns3", log_path=str(Path(folder) / "route.jsonl"))
+            engine = Engine(cfg).build()
+            control = LiveController(engine, tick_seconds=0)
+            control.tick(engine, 1.)
+            engine.agents["S1"].routing.parent = "R1"
+            control.tick(engine, 1.5)
+            state = control.snapshot
+            self.assertEqual(state["routing_tree"]["S1"], "R1")
+            self.assertEqual(state["handovers"]["S1"], 1.5)
+            self.assertTrue(state["network_history"])
+            control.tick(engine, 32.)
+            self.assertTrue(all(point["t"] >= 2. for point in control.snapshot["network_history"]))
+
+    def test_coverage_cache_follows_selection_without_protocol_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = SimConfig(slaves=0, relays=1, tasks=0, blocks=1,
+                            network_backend="ns3", log_path=str(Path(folder) / "cover.jsonl"))
+            engine = Engine(cfg).build()
+            control = LiveController(engine, tick_seconds=0)
+            control.tick(engine, .1)
+            self.assertEqual(control.snapshot["coverage_source"], "L")
+            grid = control.snapshot["coverage"]
+            control.tick(engine, .2)
+            self.assertIs(control.snapshot["coverage"], grid)
+            control.set_selection(["R1"])
+            control.tick(engine, .3)
+            self.assertEqual(control.snapshot["coverage_source"], "R1")
+            self.assertIsNot(control.snapshot["coverage"], grid)
+
+    def test_native_packet_pulses_and_coverage_respect_scene_budget(self):
+        import mujoco
+        from flightlab.viewer import LiveSwarmDisplay
+        display = LiveSwarmDisplay(["L", "S1"])
+        nodes = {"L": {"qpos": [0., 0., 20., 1., 0., 0., 0.]},
+                 "S1": {"qpos": [5., 0., 20., 1., 0., 0., 0.]}}
+        flow = [{"type": "DOWNLINK", "src": "L", "dst": "S1", "sent": .0,
+                 "at": .1, "start": [0., 0., 20.], "end": [5., 0., 20.],
+                 "packet": str(i)} for i in range(150)]
+        display.update({"t": .25, "nodes": nodes, "radio_edges": [],
+                        "packet_flow": flow, "coverage": {"origin": [0., 0., 20.],
+                        "bounds": [0., 0., 40., 40.],
+                        "dx": 2., "dy": 2., "cells": [[0., 0., "strong"]] * 200}})
+        scene = mujoco.MjvScene(display.model, maxgeom=48)
+        display.overlay(scene, show_coverage=True)
+        self.assertLessEqual(scene.ngeom, 48)
+        self.assertTrue(any(g.type == mujoco.mjtGeom.mjGEOM_SPHERE and
+                            g.rgba[2] > .7 and g.rgba[0] < .3
+                            for g in scene.geoms[:scene.ngeom]))
+        self.assertTrue(any(g.type == mujoco.mjtGeom.mjGEOM_BOX for g in scene.geoms[:scene.ngeom]))
+
+    def test_coverage_is_modeled_without_link_model_mutation(self):
+        from skyfleet.world.building import Building
+        from skyfleet.sim.network_visuals import coverage_grid
+        wall = Building("wall", (4., -2., 2., 4.), 50.)
+        grid = coverage_grid((0., 0., 20.), [wall], (0., -4., 12., 4.),
+                             building_loss_db=35., columns=12, rows=8)
+        self.assertEqual(len(grid["cells"]), 96)
+        self.assertEqual(grid["cells"][4 * 12 + 2][2], "strong")
+        self.assertEqual(grid["cells"][4 * 12 + 10][2], "shadow")
+
     def test_ns3_expired_unicast_is_counted_from_done_event(self):
         from skyfleet.protocol.message import Msg
         from types import SimpleNamespace
@@ -109,6 +245,13 @@ class TestLiveControl(unittest.TestCase):
         self.assertTrue(any(g.type == mujoco.mjtGeom.mjGEOM_CAPSULE and
                             .2 < g.rgba[0] < .9 and .2 < g.rgba[1] < .9
                             for g in scene.geoms[:scene.ngeom]))
+
+    def test_web_visualizations_bind_to_snapshot_and_switches(self):
+        from skyfleet.viz.live_page import NATIVE_CONTROL_HTML
+        for marker in ('id="coverage-toggle"', 'id="routing-tree"',
+                       'id="network-chart"', 'packet_flow', 'network_history',
+                       'handovers', 'coverage.cells'):
+            self.assertIn(marker, NATIVE_CONTROL_HTML)
 
     def test_web_telemetry_panel_binds_to_snapshot(self):
         from skyfleet.viz.live_page import NATIVE_CONTROL_HTML

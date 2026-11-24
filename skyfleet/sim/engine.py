@@ -308,6 +308,7 @@ class Engine:
         self.radio_observer = None  # optional accepted ns-3 reception callback
         self.telemetry_observer = None  # optional ns-3 per-hop RX/expiry facts
         self.e2e_observer = None  # optional accepted final-destination delay
+        self.packet_observer = None  # read-only per-ns-3-hop visualization events
 
     # ================= 构建 =================
 
@@ -1535,10 +1536,13 @@ class Engine:
                 if rx.get("done"):
                     entry = self._ns3_pending.pop(rx["id"], None)
                     next_hop = self._ns3_hops.pop(rx["id"], None)
-                    if (entry is not None and next_hop != BROADCAST and
-                            self.telemetry_observer is not None):
-                        self.telemetry_observer(entry[1].node.node_id,
-                            next_hop, entry[2], None, None, False)
+                    if entry is not None and next_hop != BROADCAST:
+                        if self.telemetry_observer is not None:
+                            self.telemetry_observer(entry[1].node.node_id,
+                                next_hop, entry[2], None, None, False)
+                        if self.packet_observer is not None:
+                            self.packet_observer(rx["id"], entry[0],
+                                entry[1].node.node_id, next_hop, entry[2], -rx["t"])
                     continue
                 entry = self._ns3_pending.get(rx["id"])
                 if entry is None:
@@ -1556,6 +1560,9 @@ class Engine:
                     self.telemetry_observer(sender.node.node_id, rx["dst"],
                         started, rx["t"], rx.get("modeled_rx_dbm"),
                         msg.dst == BROADCAST)
+                if self.packet_observer is not None:
+                    self.packet_observer(rx["id"], msg, sender.node.node_id,
+                        rx["dst"], started, rx["t"])
                 # ns-3 owns path loss / interference / MAC; SkyFleet only owns
                 # routing and higher-level protocol decisions.
                 attempt = _InjectedAttempt(t_start=started, t_end=rx["t"],
@@ -1582,6 +1589,9 @@ class Engine:
         self._ns3.send(identifier, sender.node.node_id, next_hop, msg.size_bits, t)
         self._ns3_pending[identifier] = (msg, sender, t)
         self._ns3_hops[identifier] = next_hop
+        if self.packet_observer is not None:
+            self.packet_observer(identifier, msg, sender.node.node_id,
+                                 next_hop, t, None)
         sender.spend_energy(self.energy.tx_energy_per_bit() * msg.size_bits)
         self.log.write(EventKind.MSG_TX, t, node_id=sender.node.node_id,
                        msg_id=msg.msg_id, msg_type=msg.msg_type,

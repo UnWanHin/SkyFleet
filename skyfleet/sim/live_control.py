@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import deque
 import queue
 import threading
 import time
@@ -41,6 +42,16 @@ class LiveController:
         self._selected: list[str] = []
         self._selection_version = 0
         self._preview: list[float] | None = None
+        self._packet_pending: dict[str, dict] = {}
+        self._pdr_completed = 0
+        self._packet_flow: deque[dict] = deque(maxlen=128)
+        self._pdr_received = 0
+        self._network_history: deque[dict] = deque(maxlen=320)
+        self._routing_parents: dict[str, str | None] = {}
+        self._handovers: dict[str, float] = {}
+        self._coverage_cache_key = None
+        self._coverage_cache_time = float('-inf')
+        self._coverage_cache = None
 
     def set_preview(self, destination: list[float] | None) -> list[float] | None:
         """Publish a display-only target; delivery begins only at submit()."""
@@ -83,6 +94,37 @@ class LiveController:
                                  "selection_version": self._selection_version}
             return self._selected.copy()
 
+    def packet_observer(self, identifier, msg, src, dst, sent, received):
+        """Observe MAC handoff / actual reception / unicast expiry, not PHY TX."""
+        kind = ("DOWNLINK" if msg.src == self.engine.leader_id else "UPLINK"
+                if msg.dst == self.engine.leader_id else "PEER")
+        if received is None:
+            if dst != "*":
+                self._packet_pending[identifier] = {"type": kind, "src": src,
+                                                     "dst": dst, "sent": sent,
+                                                     "start": list(self.engine.nodes[src].pos)}
+            return
+        event = self._packet_pending.pop(identifier, None)
+        if received < 0:
+            if event is not None:
+                self._pdr_completed += 1
+                self._packet_flow.append({"type": "DROP", "src": src,
+                                          "dst": dst, "at": -received,
+                                          "packet": identifier,
+                                          "position": event["start"]})
+            return
+        if event is None:
+            # A broadcast can produce multiple distinct receiver events.
+            event = {"type": kind, "src": src, "dst": dst, "sent": sent}
+        else:
+            self._pdr_received += 1
+            self._pdr_completed += 1
+        self._packet_flow.append({"type": event["type"], "src": src,
+                                  "dst": dst, "at": received, "sent": sent,
+                                  "packet": identifier,
+                                  "start": event.get("start", list(self.engine.nodes[src].pos)),
+                                  "end": list(self.engine.nodes[dst].pos)})
+
     def start_radio_observation(self) -> None:
         def observe(src: str, dst: str, t: float) -> None:
             self._last_radio_rx[tuple(sorted((src, dst)))] = t
@@ -113,6 +155,7 @@ class LiveController:
             self._received_e2e += 1
             self._total_e2e_delay_ms += seconds * 1000.
         self.engine.e2e_observer = end_to_end
+        self.engine.packet_observer = self.packet_observer
 
     def submit(self, data: dict) -> dict:
         if self.finished or self.shutdown.is_set():
@@ -250,14 +293,69 @@ class LiveController:
                                 "modeled_obstruction": obstructed})
         radio_links = [list(pair) for pair, last in sorted(self._last_radio_rx.items())
                        if t - last <= 1.5 and set(pair) <= set(ids)]
+        routing_tree = {name: engine.agents[name].upstream() for name in ids
+                        if name != engine.leader_id}
+        for name, parent in routing_tree.items():
+            if name in self._routing_parents and self._routing_parents[name] != parent:
+                self._handovers[name] = t
+        self._routing_parents = routing_tree.copy()
+        self._handovers = {name: moment for name, moment in self._handovers.items()
+                           if t - moment <= 3.}
+        pdr = round(100. * self._pdr_received / self._pdr_completed, 2) if self._pdr_completed else None
         network = {"connectivity": round((len(paths) - 1) / max(1, len(ids) - 1), 3) if engine.config.network_backend == "ns3" else None,
+                   "pdr_percent": pdr, "pdr_scope": "completed_unicast_hops",
+                   "unicast_in_flight": len(self._packet_pending),
+                   "active_connections": sum(len(links) for links in adjacency.values()) // 2,
                    "avg_hop_delay_ms": round(self._total_hop_delay_ms / self._received_hops, 3) if self._received_hops else None,
                    "avg_e2e_delay_ms": round(self._total_e2e_delay_ms / self._received_e2e, 3) if self._received_e2e else None,
                    "lost": self._lost_hops, "received": self._received_hops}
+        history_point = {"t": round(t, 2), "pdr_percent": pdr,
+                         "avg_e2e_delay_ms": network["avg_e2e_delay_ms"],
+                         "active_connections": network["active_connections"]}
+        if self._network_history and self._network_history[-1]["t"] == history_point["t"]:
+            self._network_history[-1] = history_point
+        else:
+            self._network_history.append(history_point)
+        while self._network_history and self._network_history[0]["t"] < t - 30.:
+            self._network_history.popleft()
+        self._packet_flow = deque((event for event in self._packet_flow
+                                   if event["at"] >= t - 3.), maxlen=128)
+        coverage = None
+        if engine.config.network_backend == "ns3" and ids:
+            from skyfleet.sim.network_visuals import coverage_grid
+            with self.lock:
+                chosen = self._selected[0] if len(self._selected) == 1 else engine.leader_id
+            if chosen not in nodes:
+                chosen = engine.leader_id
+            origin = nodes[chosen]["pos"]
+            buildings = engine.buildings
+            if buildings:
+                xmin = min(origin[0], *(b.rect[0] for b in buildings)) - 15.
+                ymin = min(origin[1], *(b.rect[1] for b in buildings)) - 15.
+                xmax = max(origin[0], *(b.rect[0] + b.rect[2] for b in buildings)) + 15.
+                ymax = max(origin[1], *(b.rect[1] + b.rect[3] for b in buildings)) + 15.
+            else:
+                xmin, ymin = origin[0] - 100., origin[1] - 100.
+                xmax, ymax = origin[0] + 100., origin[1] + 100.
+            # Quantize bounds as well as the origin to avoid grid churn on every
+            # sub-metre flight movement; refresh at most once each 2 sim seconds.
+            bounds = tuple(2. * round(v / 2.) for v in (xmin, ymin, xmax, ymax))
+            cache_key = (chosen, tuple(round(v / 2.) for v in origin), bounds,
+                         engine.config.ns3_building_loss_db)
+            if cache_key != self._coverage_cache_key or t - self._coverage_cache_time >= 2.:
+                self._coverage_cache = coverage_grid(origin, buildings, bounds,
+                    building_loss_db=engine.config.ns3_building_loss_db)
+                self._coverage_cache_key = cache_key
+                self._coverage_cache_time = t
+            coverage = self._coverage_cache
         snapshot = {"t": round(t, 2), "duration": engine.config.duration,
                     "running": True, "nodes": nodes, "edges": edges,
                     "radio_links": radio_links, "radio_edges": radio_edges,
-                    "network": network, "formation_skeleton": formation_skeleton,
+                    "network": network, "network_history": list(self._network_history),
+                    "packet_flow": list(self._packet_flow),
+                    "routing_tree": routing_tree, "handovers": self._handovers.copy(),
+                    "coverage": coverage, "coverage_source": chosen if coverage else None,
+                    "formation_skeleton": formation_skeleton,
                     "components": components,
                     "buildings": [[*b.rect, b.height, b.base_height]
                                   for b in engine.buildings]}

@@ -114,7 +114,8 @@ class LiveSwarmDisplay:
             body_id = int(self.model.body_parentid[body_id])
         return None
 
-    def overlay(self, scene, *, selected=(), preview=None):
+    def overlay(self, scene, *, selected=(), preview=None, show_coverage=False,
+                render_t=None):
         """Draw identifiers, selected rings, preview and accepted ns-3 hops."""
         scene.ngeom = 0
         if not self.latest:
@@ -182,6 +183,29 @@ class LiveSwarmDisplay:
             if geom is not None:
                 mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_CAPSULE,
                                      .045, start, end)
+        # Packet highlights take priority over the optional coverage raster.
+        # Only observed ns-3 reception/expiry events reach this stream.
+        now = self.latest.get("t", 0.) if render_t is None else render_t
+        for event in self.latest.get("packet_flow", [])[-32:]:
+            age = now - event["at"]
+            if event["type"] == "DROP":
+                if not 0 <= age <= .65:
+                    continue
+                position = event.get("position")
+                color = (1., .16, .12, .8 if int(age * 12) % 2 == 0 else .2)
+            else:
+                if not 0 <= age <= .8:
+                    continue
+                start, end = event.get("start"), event.get("end")
+                if start is None or end is None:
+                    continue
+                fraction = max(0., min(1., age / .8))
+                position = [start[i] + (end[i] - start[i]) * fraction for i in range(3)]
+                color = ((.05, .94, 1., .95) if event["type"] == "DOWNLINK"
+                         else (.95, .42, 1., .95))
+            if position is not None and scene.ngeom < min(scene.maxgeom, 256):
+                self._geom(scene, mujoco.mjtGeom.mjGEOM_SPHERE,
+                           (.55, .55, .55), position, color)
         for a, b in self.latest.get("formation_skeleton", []):
             if a not in nodes or b not in nodes:
                 continue
@@ -194,6 +218,20 @@ class LiveSwarmDisplay:
                     mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_CAPSULE,
                                          .07, start + (end - start) * lo,
                                          start + (end - start) * hi)
+        coverage = self.latest.get("coverage") if show_coverage else None
+        if coverage:
+            xmin, ymin, _, _ = coverage["bounds"]
+            for col, row, grade in coverage["cells"]:
+                if scene.ngeom >= min(scene.maxgeom, 192):
+                    break
+                x = xmin + (col + .5) * coverage["dx"]
+                y = ymin + (row + .5) * coverage["dy"]
+                color = {"strong": (.15, .85, .45, .16),
+                         "shadow": (.6, .11, .12, .24),
+                         "weak": (.28, .28, .32, .12)}[grade]
+                self._geom(scene, mujoco.mjtGeom.mjGEOM_BOX,
+                           (coverage["dx"]*.48, coverage["dy"]*.48, .07),
+                           (x, y, coverage["origin"][2] - 1.), color)
 
 
 class LiveCamera:
@@ -230,6 +268,7 @@ class LiveKeys:
         self.events = queue.SimpleQueue()
         self.preview = None
         self.recenter = False
+        self.show_coverage = False
 
     def __call__(self, keycode):
         # MuJoCo only forwards keycode. Capture modifier *at callback time*;
@@ -263,6 +302,8 @@ class LiveKeys:
                 index = self.ids.index(current[0]) if len(current) == 1 else -1
                 direction = -1 if shift else 1
                 self.controller.set_selection([self.ids[(index + direction) % len(self.ids)]])
+            elif key == 86:  # V: toggle the read-only modeled LoS coverage layer
+                self.show_coverage = not self.show_coverage
             elif key == 67:  # C: recenter and follow a single selected drone
                 self.recenter = True
             elif key == 70:  # F: camera focus, altitude of selected drone
@@ -325,6 +366,8 @@ def view_live(controller, *, refresh_s=1/30):
         last_selected_body = 0
         last_selection_version = -1
         last_preview = None
+        last_coverage = False
+        last_wall = time.monotonic()
         logged_pose_range = False
         while viewer.is_running() and not controller.shutdown.is_set():
             with controller.lock:
@@ -352,12 +395,20 @@ def view_live(controller, *, refresh_s=1/30):
                         camera.update(keys, selected, positions)
                 preview = keys.preview if keys.preview is not None else controller.preview()
                 if (state is not last or preview != last_preview or
+                        state.get('packet_flow') or
+                        keys.show_coverage != last_coverage or
                         controller.selection_version != last_selection_version):
+                    if state is not last:
+                        last_wall = time.monotonic()
                     with viewer.lock():
                         if state is not last:
                             display.update(state)
                         display.overlay(viewer.user_scn, selected=selected,
-                                        preview=preview)
+                                        preview=preview,
+                                        show_coverage=keys.show_coverage,
+                                        render_t=min(state.get('t', 0.) + .8,
+                                            state.get('t', 0.) + max(0., time.monotonic()-last_wall)))
+                    last_coverage = keys.show_coverage
                     last = state
                     last_selection_version = controller.selection_version
                     last_preview = preview
