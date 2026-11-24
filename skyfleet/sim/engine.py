@@ -306,6 +306,8 @@ class Engine:
         self._adaptive_modes: dict[str, str] = {}
         self.live_hook = None
         self.radio_observer = None  # optional accepted ns-3 reception callback
+        self.telemetry_observer = None  # optional ns-3 per-hop RX/expiry facts
+        self.e2e_observer = None  # optional accepted final-destination delay
 
     # ================= 构建 =================
 
@@ -1531,8 +1533,12 @@ class Engine:
             queued_receive = False
             for rx in deliveries:
                 if rx.get("done"):
-                    self._ns3_pending.pop(rx["id"], None)
-                    self._ns3_hops.pop(rx["id"], None)
+                    entry = self._ns3_pending.pop(rx["id"], None)
+                    next_hop = self._ns3_hops.pop(rx["id"], None)
+                    if (entry is not None and next_hop != BROADCAST and
+                            self.telemetry_observer is not None):
+                        self.telemetry_observer(entry[1].node.node_id,
+                            next_hop, entry[2], None, None, False)
                     continue
                 entry = self._ns3_pending.get(rx["id"])
                 if entry is None:
@@ -1546,6 +1552,10 @@ class Engine:
                 if msg.dst != BROADCAST:
                     self._ns3_pending.pop(rx["id"], None)
                     self._ns3_hops.pop(rx["id"], None)
+                if self.telemetry_observer is not None:
+                    self.telemetry_observer(sender.node.node_id, rx["dst"],
+                        started, rx["t"], rx.get("modeled_rx_dbm"),
+                        msg.dst == BROADCAST)
                 # ns-3 owns path loss / interference / MAC; SkyFleet only owns
                 # routing and higher-level protocol decisions.
                 attempt = _InjectedAttempt(t_start=started, t_end=rx["t"],
@@ -1732,6 +1742,8 @@ class Engine:
             self._maybe_elect(t)
 
         created = msg.t_created
+        if self.e2e_observer is not None and self._ns3 is not None:
+            self.e2e_observer(max(0., t - created))
         attempt = payload.attempt
         # 采样等待与排队只有**本机产生**的消息才有意义：广播接收方与
         # 转发副本的接收方从未在本机排队，此时两段记为 0，

@@ -21,6 +21,35 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @unittest.skipUnless(os.environ.get("SKYFLEET_NS3_BRIDGE"), "ns-3 bridge binary not built")
 class Ns3Integration(unittest.TestCase):
+    def test_shadow_reduces_modeled_receive_power_for_same_delivery(self):
+        from skyfleet.world.building import Building
+        def power(blocks):
+            with Ns3Bridge({"L": (0, 0, 30), "S1": (10, 0, 30)}, seed=4,
+                           buildings=blocks, building_loss_db=5.) as radio:
+                radio.send("shadow", "L", "S1", 256, .1)
+                events = []
+                while radio.now < 1.3:
+                    events.extend(radio.advance(1.3))
+                return next(e["modeled_rx_dbm"] for e in events
+                            if e.get("dst") == "S1")
+        wall = Building("wall", (4., -10., 2., 20.), 60.)
+        self.assertAlmostEqual(power([]) - power([wall]), 5., places=3)
+
+    def test_received_power_is_modeled_and_obstruction_attenuates(self):
+        from skyfleet.world.building import Building
+        block = Building("wall", (4., -10., 2., 20.), 60.)
+        with Ns3Bridge({"L": (0, 0, 30), "S1": (10, 0, 30)}, seed=4,
+                       buildings=[block], building_loss_db=5.) as radio:
+            radio.send("shadow", "L", "S1", 256, 0.1)
+            events = []
+            while radio.now < 1.3:
+                events.extend(radio.advance(1.3))
+            self.assertTrue(any(x.get("done") for x in events))
+            rx = [x for x in events if x.get("dst") == "S1"]
+            self.assertTrue(rx, "moderate shadow should still deliver")
+            self.assertIsInstance(rx[0]["modeled_rx_dbm"], float)
+            self.assertTrue(-200 < rx[0]["modeled_rx_dbm"] < 25)
+
     def test_wifi_delivers_nearby_and_loses_distant_packet(self):
         with Ns3Bridge({"L": (0, 0, 10), "S1": (4, 0, 10),
                         "S2": (6000, 0, 10)}, seed=4) as radio:

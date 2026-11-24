@@ -150,15 +150,50 @@ class LiveSwarmDisplay:
                                               preview[2] + 3), (1., 1., .4, 1.))
             if label is not None:
                 label.label = str(tuple(round(float(x), 1) for x in preview))
-        for a, b in self.latest.get("radio_links", []):
+        edges = self.latest.get("radio_edges")
+        if edges is None:
+            edges = [{"a": a, "b": b, "status": "good"}
+                     for a, b in self.latest.get("radio_links", [])]
+        for edge in edges:
+            a, b = edge["a"], edge["b"]
             if a not in nodes or b not in nodes:
                 continue
-            start, end = nodes[a]["qpos"][:3], nodes[b]["qpos"][:3]
+            start, end = np.asarray(nodes[a]["qpos"][:3]), np.asarray(nodes[b]["qpos"][:3])
+            status = edge.get("status", "good")
+            color = {"good": (.15, 1., .45, .9), "edge": (1., .67, .12, .85),
+                     "lost": (1., .2, .18, .9)}.get(status, (.5, .5, .5, .7))
+            segments = ((0., .2), (.4, .6), (.8, 1.)) if status == "lost" else ((0., 1.),)
+            for lo, hi in segments:
+                geom = self._geom(scene, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                                  (.1, .1, .1), start, color)
+                if geom is not None:
+                    mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                                         .11, start + (end - start) * lo,
+                                         start + (end - start) * hi)
+        for node in nodes.values():
+            ref = node.get("formation_reference")
+            if ref is None or "qpos" not in node:
+                continue
+            start, end = np.asarray(node["qpos"][:3]), np.asarray(ref)
+            if np.linalg.norm(end - start) < .1:
+                continue
             geom = self._geom(scene, mujoco.mjtGeom.mjGEOM_CAPSULE,
-                              (.1, .1, .1), start, (.1, 1., .55, .85))
+                              (.05, .05, .05), start, (.5, .55, .68, .55))
             if geom is not None:
                 mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_CAPSULE,
-                                     .10, np.asarray(start), np.asarray(end))
+                                     .045, start, end)
+        for a, b in self.latest.get("formation_skeleton", []):
+            if a not in nodes or b not in nodes:
+                continue
+            start = np.asarray(nodes[a].get("formation_reference", nodes[a]["qpos"][:3]))
+            end = np.asarray(nodes[b].get("formation_reference", nodes[b]["qpos"][:3]))
+            for lo, hi in ((0., .2), (.4, .6), (.8, 1.)):
+                geom = self._geom(scene, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                                  (.1, .1, .1), start, (.65, .7, .76, .35))
+                if geom is not None:
+                    mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                                         .07, start + (end - start) * lo,
+                                         start + (end - start) * hi)
 
 
 class LiveCamera:

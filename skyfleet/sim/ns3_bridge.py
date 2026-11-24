@@ -97,9 +97,15 @@ class Ns3Bridge:
             if len(line) == 3 and line[0] == "DONE":
                 deliveries.append({"id": line[1], "done": True, "t": int(line[2]) / 1e9})
                 continue
-            if len(line) != 4 or line[0] != "RX":
+            if len(line) not in (4, 5) or line[0] != "RX":
                 raise RuntimeError(f"Malformed ns-3 bridge reply: {line}")
-            deliveries.append({"id": line[1], "dst": line[2], "t": int(line[3]) / 1e9})
+            event = {"id": line[1], "dst": line[2], "t": int(line[3]) / 1e9}
+            if len(line) == 5:
+                power = float(line[4])
+                if not math.isfinite(power):
+                    raise RuntimeError("Invalid ns-3 modeled receive power")
+                event["modeled_rx_dbm"] = power
+            deliveries.append(event)
         return deliveries
 
     def close(self) -> None:

@@ -37,6 +37,41 @@ The ns-3 bridge runs as a separate process; MuJoCo and NumPy are required by
 `SKYFLEET_NS3_PREFIX`/`SKYFLEET_NS3_BUILD_DIR` can override install
 and bridge build locations. The bridge build is local and ignored by Git.
 
+## Live telemetry and formation
+
+```bash
+export SKYFLEET_NS3_BRIDGE="$PWD/.build/ns3-bridge/skyfleet-ns3-bridge"
+.venv/bin/python -m skyfleet.cli live --config skyfleet/scenarios/ns3_mujoco.json \
+  --viewer mujoco --port 8765 --duration 60 --log out/logs/live_ns3.jsonl
+```
+
+Open `http://127.0.0.1:8765` for the Mini-Map and dispatch telemetry; the
+native MuJoCo window remains the 3D viewer. L / R1–R2 / S1–S8 have distinct
+labels and colors. Successful recent hop receptions are green when modeled
+power and delay are healthy, amber below −75 dBm, above 30 ms, or when the
+current *geometric* ray intersects a building. A unicast handed to ns-3 that
+expires without a reception is red and dashed for three simulation seconds.
+Missing traffic is not counted as loss. A green or amber hop is not a
+calibrated radio guarantee.
+
+`modeled_rx_dbm` is **not measured PHY RSSI**: it is recomputed on successful
+reception using the deterministic 25 dBm transmit power and the same
+LogDistance/BuildingShadowLoss parameter chain as the ns-3 channel. PHY
+interference, instantaneous power measurement, and unsuccessful-frame RSSI
+are not reported. `avg_hop_delay_ms` samples received hops from MAC handoff
+to packet reception; `avg_e2e_delay_ms` samples accepted final-destination
+messages from creation to acceptance. The loss counter is cumulative unicast
+MAC-bookkeeping expiry, not PHY packet error count; broadcasts are excluded.
+`connectivity` and the displayed paths are inferred from **recent observed
+undirected receptions**, not the protocol's selected forwarding routes or
+proof of bidirectional connectivity. `protocol_parent` is the agent's actual
+current upstream selection, whereas `parent` is only the predecessor on the
+candidate path. They become unknown when receptions age out; the
+classic backend returns no observed ns-3 connectivity. Formation reference
+points follow the active adaptive matrix target (spacing 3 m); the gray
+skeleton and deviation vectors are visual guides only, with no effect on the
+MuJoCo flight state, ns-3 clock, or routing.
+
 ## Run
 
 ```bash

@@ -22,6 +22,8 @@ static std::vector<std::string> arrivals;
 struct Block { double x, y, width, depth, height, base = 0.0; };
 static std::vector<Block> buildings;
 static double buildingLossDb = 0.0;
+static Ptr<PropagationLossModel> telemetryLoss;
+static std::map<std::string, unsigned> senderByPacket;
 
 // Liang-Barsky clipping of the horizontal radio segment against a roof footprint.
 // A roof blocks only if the ray at its first horizontal intersection is below it.
@@ -73,8 +75,14 @@ static bool Received(unsigned recipient, Ptr<NetDevice>, Ptr<const Packet> packe
     packet->CopyData(payload.data(), payload.size());
     std::string id(payload.begin(), payload.end());
     id = id.substr(0, id.find('\0'));
+    // Read the same deterministic propagation chain as the PHY. This is
+    // modeled received power, not a per-packet PHY RSSI measurement.
+    double rxDbm = telemetryLoss->CalcRxPower(
+        25.0, nodes.Get(senderByPacket.at(id))->GetObject<MobilityModel>(),
+        nodes.Get(recipient)->GetObject<MobilityModel>());
     arrivals.push_back("RX " + id + " " + names.at(recipient) + " " +
-                       std::to_string(Simulator::Now().GetNanoSeconds()));
+                       std::to_string(Simulator::Now().GetNanoSeconds()) + " " +
+                       std::to_string(rxDbm));
     Simulator::Stop(); // return control to SkyFleet at the receive timestamp
     return true;
 }
@@ -95,7 +103,14 @@ static void Init(unsigned count, unsigned seed) {
     YansWifiPhyHelper phy;
     phy.Set("TxPowerStart", DoubleValue(25.0));
     phy.Set("TxPowerEnd", DoubleValue(25.0));
-    phy.SetChannel(channel.Create());
+    auto logLoss = CreateObject<LogDistancePropagationLossModel>();
+    logLoss->SetAttribute("Exponent", DoubleValue(2.0));
+    logLoss->SetNext(CreateObject<BuildingShadowLoss>());
+    telemetryLoss = logLoss;
+    auto sharedChannel = channel.Create();
+    // The channel's propagation helper constructs an equivalent chain;
+    // telemetryLoss is a read-only mirror with identical parameters.
+    phy.SetChannel(sharedChannel);
     WifiMacHelper mac;
     mac.SetType("ns3::AdhocWifiMac");
     devices = wifi.Install(phy, mac, nodes);
@@ -113,6 +128,7 @@ static void SendAt(unsigned src, unsigned dst, std::string id, unsigned size) {
     std::vector<uint8_t> data(std::max(size, static_cast<unsigned>(id.size() + 1)), 0);
     std::copy(id.begin(), id.end(), data.begin());
     auto pkt = Create<Packet>(data.data(), data.size());
+    senderByPacket[id] = src;
     Address target = dst == names.size() ? Mac48Address::GetBroadcast()
                                          : devices.Get(dst)->GetAddress();
     devices.Get(src)->Send(pkt, target, 0x88B5);
@@ -167,6 +183,7 @@ int main() {
                                 &SendAt, indexByName.at(src), destination, id, bytes);
             Simulator::Schedule(NanoSeconds(ns + packetRetentionNs - Simulator::Now().GetNanoSeconds()),
                                 [id]() {
+                                    senderByPacket.erase(id);
                                     arrivals.push_back("DONE " + id + " " +
                                                        std::to_string(Simulator::Now().GetNanoSeconds()));
                                     Simulator::Stop();
