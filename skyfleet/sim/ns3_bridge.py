@@ -13,7 +13,8 @@ from skyfleet.world.building import Building
 class Ns3Bridge:
     def __init__(self, positions: Mapping[str, tuple[float, float, float]], seed: int,
                  binary: str | None = None, buildings: Sequence[Building] = (),
-                 building_loss_db: float = 0.0) -> None:
+                 building_loss_db: float = 0.0, tx_power_dbm: float = 25.0,
+                 path_loss_exponent: float = 2.0) -> None:
         exe = binary or os.environ.get("SKYFLEET_NS3_BRIDGE")
         if not exe or not Path(exe).is_file():
             raise RuntimeError("network_backend=ns3 needs SKYFLEET_NS3_BRIDGE pointing to the built bridge executable")
@@ -23,6 +24,11 @@ class Ns3Bridge:
         self.now = 0.0
         self._names = frozenset(positions)
         try:
+            if not math.isfinite(tx_power_dbm) or not -20 <= tx_power_dbm <= 30:
+                raise ValueError("tx_power_dbm must be finite and between -20 and 30")
+            if not math.isfinite(path_loss_exponent) or not 1 <= path_loss_exponent <= 6:
+                raise ValueError("path_loss_exponent must be finite and between 1 and 6")
+            self._command(f"RADIO {tx_power_dbm:.12g} {path_loss_exponent:.12g}")
             self._command(f"INIT {len(positions)} {seed}")
             if not math.isfinite(building_loss_db) or not 0 <= building_loss_db <= 200:
                 raise ValueError("building_loss_db must be finite and between 0 and 200")

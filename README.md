@@ -218,12 +218,12 @@ D5 合成拱廊示例：加入 `--city skyfleet/scenarios/d5_urban_city.geojson 
 `--through X,Y,Z` 可依場景樓塊幾何規劃排隊穿越窄通道、離開後回復矩陣；
 若使用 ns-3，控制指令必須實際收到才改航線。`TOPOLOGY_CHANGE` 記錄的是幾何估算的
 無線連通分量，編組標籤則是任務分組，兩者都不代表建立了獨立組長／共識協議。
-輸出包含 `dispatch.jsonl` 和 `dispatch_3d.html`。運行中互動請啟動獨立控制頁：
+輸出包含 `dispatch.jsonl` 和 `dispatch_3d.html`。運行中互動可在專案目錄直接執行 `./start.sh`（預設開啟 MuJoCo 3D 與 `http://127.0.0.1:8765/` 控制台；可用 `./start.sh --duration 300 --port 9000` 覆蓋參數）。若從其他目錄啟動，也可指定腳本完整路徑。首次使用需先依 `ns3_bridge/README.md` 建置 ns-3 bridge。啟動腳本預設使用獨立的 `ns3_mujoco_urban_multihop.json`：20 dBm、LogDistance 指數 2.5、樓塊遮擋一次扣 35 dB，並啟用本地一跳鄰居心跳（從機原有的主節點上行心跳仍保留）。此場景將 R1 固定於 `(140,150,100)` 形成遮擋時仍通往 L 的兩跳路徑；直連候選門限與上游採納門限皆為 0.35、保持時間 0.2 秒，其他場景沿用原預設。派遣 S4 至 `(100,20,30)` 的原生實測中，S4 遮擋直連實際失收、切換至 R1 後首條遙測在遮擋後約 0.48 秒抵達 L（固定種子與該軌跡；不是任意城市的保證）。實測空曠單跳 160 m 收到、170 m 失收；此距離只是固定種子及封包長度的測試結果，不是所有信道條件的硬截斷。原版 `ns3_mujoco.json` 及 `classic` 的配置預設維持不變。控制台可向 S1–S4 派遣 `[100,20,30]`，保持 R1/R2 靜止以檢驗直連遇樓遮擋後切換中繼；R1/R2 同時派遣到樓後會破壞中繼回傳鏈路。原本的完整指令仍可使用：
 
 ```bash
 SKYFLEET_NS3_BRIDGE="$PWD/.build/ns3-bridge/skyfleet-ns3-bridge" \
   .venv/bin/python -m skyfleet.cli live \
-  --config skyfleet/scenarios/ns3_mujoco.json \
+  --config skyfleet/scenarios/ns3_mujoco_urban_multihop.json \
   --city skyfleet/scenarios/d5_urban_city.geojson \
   --duration 120 --tick-seconds 0.1 --port 8765 --viewer mujoco
 ```

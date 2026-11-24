@@ -55,6 +55,8 @@ class SimConfig:
     #: 近乎全有或全无，门限因此调不动。没有可比较的布点，任何「优化」都
     #: 不可验证。默认 `ring` 保持历史行为逐位不变。
     relay_layout: str = "ring"
+    #: Optional fixed relay positions for a calibrated city scene; ring stays default.
+    relay_positions: dict[str, tuple[float, float, float]] | None = None
     #: 0 retains legacy deterministic election; positive value requires
     #: distinct accepted votes received by the successor before takeover.
     election_votes_required: int = 0
@@ -125,6 +127,11 @@ class SimConfig:
     #: Optional additional ns-3 radio loss in dB when a building intersects
     #: the 3D radio ray; 0 preserves the pre-building ns-3 radio behavior.
     ns3_building_loss_db: float = 0.0
+    #: ns-3 PHY power and log-distance exponent (legacy defaults retained).
+    ns3_tx_power_dbm: float = 25.0
+    ns3_path_loss_exponent: float = 2.0
+    #: Extra one-hop broadcast in addition to the routed heartbeat.
+    ns3_neighbor_beacons: bool = False
     #: 指令台限速触发阈值：最大电机转速与 omega_max 的比值。
     #: 仅在物理运动开启时生效；设为 0 可关闭远程修正。
     motor_guard_ratio: float = 0.8

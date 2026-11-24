@@ -409,6 +409,13 @@ class Engine:
                 z = rng.uniform(low, high)
             x = bx + rng.uniform(-15.0, 15.0)
             y = by + rng.uniform(-15.0, 15.0)
+            if role is Role.RELAY and cfg.relay_positions is not None:
+                if node_id in cfg.relay_positions:
+                    x, y, z = cfg.relay_positions[node_id]
+                    if (len(cfg.relay_positions[node_id]) != 3 or
+                            not all(math.isfinite(v) for v in (x, y, z)) or
+                            not (0 <= x <= area and 0 <= y <= area and z > 0)):
+                        raise ValueError(f"invalid relay position: {node_id}")
             self.nodes[node_id] = Node(
                 node_id, role,
                 (min(max(x, 0.0), area), min(max(y, 0.0), area), z),
@@ -527,7 +534,9 @@ class Engine:
                 from skyfleet.sim.ns3_bridge import Ns3Bridge
                 self._ns3 = Ns3Bridge({n: node.pos for n, node in self.nodes.items()},
                                       self.config.seed, buildings=self.buildings,
-                                      building_loss_db=self.config.ns3_building_loss_db)
+                                      building_loss_db=self.config.ns3_building_loss_db,
+                                      tx_power_dbm=self.config.ns3_tx_power_dbm,
+                                      path_loss_exponent=self.config.ns3_path_loss_exponent)
                 self.scheduler.before_time = self._ns3_advance
             self._subscribe()
             self._start()
@@ -616,6 +625,13 @@ class Engine:
             leader_agent.membership.on_join(node_id, session, 0.0)
             leader_agent.membership.set_energy(node_id, cfg.initial_energy)
             self._node_task_queue[node_id] = []
+
+        if cfg.network_backend == "ns3" and cfg.ns3_neighbor_beacons:
+            # Opt-in mesh members know each other's current joined sessions.
+            # The normal strict accept() session check remains unchanged.
+            sessions = {agent.session_id for agent in self.agents.values()}
+            for agent in self.agents.values():
+                agent.view.sessions.update(sessions)
 
         self.leader.create_tasks(0.0)
         self.wire_leader_handlers()
@@ -807,6 +823,10 @@ class Engine:
             self._last_leader_beat = t
         else:
             agent.on_heartbeat_tick(t)
+            if self.config.network_backend == "ns3" and self.config.ns3_neighbor_beacons:
+                # One-hop mesh hello; the routed heartbeat above remains the
+                # leader-facing liveness signal. Broadcast is never forwarded.
+                agent.on_heartbeat_tick(t, dst=BROADCAST)
         assert self.log is not None
         self.log.write(EventKind.HEARTBEAT_TX, t, node_id=agent.node.node_id)
         self.scheduler.schedule_at(
@@ -1887,6 +1907,12 @@ class Engine:
             sid for sid in leader_view.sessions
             if not sid.startswith(f"{node_id}#")}
         leader_view.sessions.add(agent.session_id)
+        if self.config.network_backend == "ns3" and self.config.ns3_neighbor_beacons:
+            for peer in self.agents.values():
+                peer.view.sessions = {
+                    sid for sid in peer.view.sessions
+                    if not sid.startswith(f"{node_id}#")}
+                peer.view.sessions.add(agent.session_id)
         assert self.log is not None
         self.log.write(EventKind.NODE_JOIN, ev.t, node_id=node_id,
                        session_id=agent.session_id, cause="REVIVE")

@@ -50,6 +50,78 @@ class Ns3Integration(unittest.TestCase):
             self.assertIsInstance(rx[0]["modeled_rx_dbm"], float)
             self.assertTrue(-200 < rx[0]["modeled_rx_dbm"] < 25)
 
+    def test_calibrated_radio_radius_and_building_loss(self):
+        from skyfleet.world.building import Building
+        wall = Building("tower", (65., -10., 10., 20.), 75.)
+        def delivered(distance, blocks=()):
+            with Ns3Bridge({"L": (0., 0., 30.), "S1": (distance, 0., 30.)},
+                           seed=4, buildings=blocks, building_loss_db=35.,
+                           tx_power_dbm=20., path_loss_exponent=2.5) as radio:
+                radio.send("urban", "L", "S1", 256, .1)
+                events = []
+                while radio.now < 1.3:
+                    events.extend(radio.advance(1.3))
+                return any(e.get("dst") == "S1" for e in events)
+        self.assertTrue(delivered(120.))
+        self.assertFalse(delivered(180.))
+        self.assertFalse(delivered(120., [wall]))
+
+    def test_urban_mesh_shadow_relay_to_leader_and_peer_beacons(self):
+        config = replace(load_config(ROOT / "skyfleet/scenarios/ns3_mujoco_urban_multihop.json"),
+                         city_geojson=str(ROOT / "skyfleet/scenarios/d5_urban_city.geojson"),
+                         tasks=0, duration=44.)
+        with TemporaryDirectory() as folder:
+            engine = Engine(replace(config, log_path=str(Path(folder) / "mesh.jsonl"))).build()
+            engine.enable_live_control()
+            engine.dispatch_live(2.5, ["S2", "S3"], (100., 20., 30.), "mesh")
+            engine.run()
+            events = list(read_log(Path(folder) / "mesh.jsonl"))
+        forwards = {e["msg_id"] for e in events if e["kind"] == "MSG_FORWARD"
+                    and e.get("node_id") == "R1"}
+        arrivals = {e["msg_id"] for e in events if e["kind"] == "MSG_RX"
+                    and e.get("node_id") == "L"}
+        for drone in ("S2", "S3"):
+            self.assertTrue(any(e["kind"] == "OCCLUSION_ENTER" and
+                                e.get("node_id") == drone for e in events))
+            self.assertTrue(any(e["kind"] == "MSG_TX" and e.get("node_id") == drone
+                                and e.get("msg_type") == "TELEMETRY" and
+                                e.get("next_hop") == "R1" and
+                                e["msg_id"] in forwards & arrivals for e in events))
+        self.assertTrue(any(e["kind"] == "MSG_RX" and e.get("node_id") == "S2"
+                            and e.get("src") == "S3" and
+                            e.get("msg_type") == "HEARTBEAT" for e in events))
+
+    def test_urban_s4_shadow_relay_recovers_within_three_seconds(self):
+        config = replace(load_config(ROOT / "skyfleet/scenarios/ns3_mujoco_urban_multihop.json"),
+                         city_geojson=str(ROOT / "skyfleet/scenarios/d5_urban_city.geojson"),
+                         tasks=0, duration=35.)
+        with TemporaryDirectory() as folder:
+            engine = Engine(replace(config, log_path=str(Path(folder) / "s4.jsonl"))).build()
+            engine.enable_live_control()
+            engine.dispatch_live(2.5, ["S4"], (100., 20., 30.), "mesh")
+            engine.run()
+            events = list(read_log(Path(folder) / "s4.jsonl"))
+        entered = next(e["t"] for e in events if e["kind"] == "OCCLUSION_ENTER"
+                       and e.get("node_id") == "S4")
+        relayed = {e["msg_id"] for e in events if e["kind"] == "MSG_FORWARD"
+                   and e.get("node_id") in ("R1", "R2")}
+        delivered = [e for e in events if e["kind"] == "MSG_RX"
+                     and e.get("node_id") == "L" and e.get("src") == "S4"
+                     and e.get("msg_type") == "TELEMETRY"
+                     and e["msg_id"] in relayed and entered <= e["t"] <= entered + 3.]
+        direct_before = [e for e in events if e["kind"] == "MSG_TX"
+                         and e.get("node_id") == "S4" and
+                         e.get("msg_type") == "TELEMETRY" and
+                         e.get("next_hop") == "L" and
+                         entered <= e["t"] < entered + 1.]
+        direct_rx = {e["msg_id"] for e in events if e["kind"] == "MSG_RX"
+                     and e.get("node_id") == "L" and e.get("src") == "S4"}
+        self.assertTrue(direct_before, "S4 must first attempt the obstructed direct link")
+        self.assertFalse(any(e["msg_id"] in direct_rx for e in direct_before),
+                         "S4 direct telemetry must actually fail under obstruction")
+        self.assertTrue(delivered, "S4 telemetry must recover via relay within 3s of shadow")
+        self.assertLessEqual(delivered[0]["t"] - entered, 3.)
+
     def test_wifi_delivers_nearby_and_loses_distant_packet(self):
         with Ns3Bridge({"L": (0, 0, 10), "S1": (4, 0, 10),
                         "S2": (6000, 0, 10)}, seed=4) as radio:

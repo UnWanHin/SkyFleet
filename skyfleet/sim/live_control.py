@@ -341,10 +341,14 @@ class LiveController:
             # sub-metre flight movement; refresh at most once each 2 sim seconds.
             bounds = tuple(2. * round(v / 2.) for v in (xmin, ymin, xmax, ymax))
             cache_key = (chosen, tuple(round(v / 2.) for v in origin), bounds,
-                         engine.config.ns3_building_loss_db)
+                         engine.config.ns3_building_loss_db,
+                         engine.config.ns3_tx_power_dbm,
+                         engine.config.ns3_path_loss_exponent)
             if cache_key != self._coverage_cache_key or t - self._coverage_cache_time >= 2.:
                 self._coverage_cache = coverage_grid(origin, buildings, bounds,
-                    building_loss_db=engine.config.ns3_building_loss_db)
+                    building_loss_db=engine.config.ns3_building_loss_db,
+                    tx_power_dbm=engine.config.ns3_tx_power_dbm,
+                    path_loss_exponent=engine.config.ns3_path_loss_exponent)
                 self._coverage_cache_key = cache_key
                 self._coverage_cache_time = t
             coverage = self._coverage_cache

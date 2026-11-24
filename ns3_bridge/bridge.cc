@@ -22,6 +22,8 @@ static std::vector<std::string> arrivals;
 struct Block { double x, y, width, depth, height, base = 0.0; };
 static std::vector<Block> buildings;
 static double buildingLossDb = 0.0;
+static double txPowerDbm = 25.0;
+static double pathLossExponent = 2.0;
 static Ptr<PropagationLossModel> telemetryLoss;
 static std::map<std::string, unsigned> senderByPacket;
 
@@ -78,7 +80,7 @@ static bool Received(unsigned recipient, Ptr<NetDevice>, Ptr<const Packet> packe
     // Read the same deterministic propagation chain as the PHY. This is
     // modeled received power, not a per-packet PHY RSSI measurement.
     double rxDbm = telemetryLoss->CalcRxPower(
-        25.0, nodes.Get(senderByPacket.at(id))->GetObject<MobilityModel>(),
+        txPowerDbm, nodes.Get(senderByPacket.at(id))->GetObject<MobilityModel>(),
         nodes.Get(recipient)->GetObject<MobilityModel>());
     arrivals.push_back("RX " + id + " " + names.at(recipient) + " " +
                        std::to_string(Simulator::Now().GetNanoSeconds()) + " " +
@@ -98,13 +100,13 @@ static void Init(unsigned count, unsigned seed) {
     YansWifiChannelHelper channel;
     channel.SetPropagationDelay("ns3::ConstantSpeedPropagationDelayModel");
     channel.AddPropagationLoss("ns3::LogDistancePropagationLossModel",
-                               "Exponent", DoubleValue(2.0));
+                               "Exponent", DoubleValue(pathLossExponent));
     channel.AddPropagationLoss("skyfleet::BuildingShadowLoss");
     YansWifiPhyHelper phy;
-    phy.Set("TxPowerStart", DoubleValue(25.0));
-    phy.Set("TxPowerEnd", DoubleValue(25.0));
+    phy.Set("TxPowerStart", DoubleValue(txPowerDbm));
+    phy.Set("TxPowerEnd", DoubleValue(txPowerDbm));
     auto logLoss = CreateObject<LogDistancePropagationLossModel>();
-    logLoss->SetAttribute("Exponent", DoubleValue(2.0));
+    logLoss->SetAttribute("Exponent", DoubleValue(pathLossExponent));
     logLoss->SetNext(CreateObject<BuildingShadowLoss>());
     telemetryLoss = logLoss;
     auto sharedChannel = channel.Create();
@@ -156,6 +158,14 @@ int main() {
                 block.base < 0 || block.base >= block.height ||
                 buildings.size() >= 10000) return 2;
             buildings.push_back(block);
+            std::cout << "OK\n";
+        } else if (op == "RADIO") {
+            double power, exponent;
+            if (!(in >> power >> exponent) || !std::isfinite(power) ||
+                !std::isfinite(exponent) || power < -20 || power > 30 ||
+                exponent < 1 || exponent > 6 || nodes.GetN() != 0) return 2;
+            txPowerDbm = power;
+            pathLossExponent = exponent;
             std::cout << "OK\n";
         } else if (op == "BUILDING_LOSS") {
             double loss;

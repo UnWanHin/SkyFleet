@@ -1,0 +1,30 @@
+{
+  "name": "ns3_mujoco_urban_multihop",
+  "description": "Bounded-range ns-3 urban mesh with relay handover",
+  "seed": 1,
+  "env_seed": 1,
+  "duration": 120.0,
+  "log_path": "out/logs/ns3_mujoco_urban_multihop.jsonl",
+  "physics_movers": true,
+  "network_backend": "ns3",
+  "slaves": 8,
+  "relays": 2,
+  "relay_positions": {"R1": [140.0, 150.0, 100.0]},
+  "tasks": 20,
+  "area": 360.0,
+  "flight_altitude": [
+    65.0,
+    100.0
+  ],
+  "cruise_altitude": 115.0,
+  "max_link_range": 230.0,
+  "relay_direct_threshold": 0.35,
+  "h_up": 0.35,
+  "h_down": 0.25,
+  "t_hold": 0.2,
+  "ns3_building_loss_db": 35.0,
+  "ns3_tx_power_dbm": 20.0,
+  "ns3_path_loss_exponent": 2.5,
+  "ns3_neighbor_beacons": true,
+  "motor_guard_ratio": 0.8
+}

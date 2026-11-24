@@ -27,7 +27,8 @@ def _blocked(a, b, building):
 
 
 def coverage_grid(origin, buildings, bounds, *, building_loss_db=0.,
-                  columns=24, rows=20, threshold_dbm=-75.):
+                  columns=24, rows=20, threshold_dbm=-75.,
+                  tx_power_dbm=25., path_loss_exponent=2.):
     """Estimate strong/weak/obstructed points in the source altitude plane.
 
     ns-3 defaults: 25 dBm Tx, LogDistance exponent 2, 46.6777 dB
@@ -44,7 +45,8 @@ def coverage_grid(origin, buildings, bounds, *, building_loss_db=0.,
         for col in range(columns):
             target = (xmin + (col+.5)*dx, ymin + (row+.5)*dy, origin[2])
             obstructed = any(_blocked(origin, target, block) for block in buildings)
-            dbm = 25. - 46.6777 - 20.*math.log10(max(1., math.dist(origin, target)))
+            dbm = tx_power_dbm - 46.6777 - 10.*path_loss_exponent*math.log10(
+                max(1., math.dist(origin, target)))
             if obstructed:
                 dbm -= building_loss_db
             status = "shadow" if obstructed else "strong" if dbm >= threshold_dbm else "weak"
