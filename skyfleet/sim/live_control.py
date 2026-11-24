@@ -34,6 +34,26 @@ class LiveController:
         self._last_radio_rx: dict[tuple[str, str], float] = {}
         self._selected: list[str] = []
         self._selection_version = 0
+        self._preview: list[float] | None = None
+
+    def set_preview(self, destination: list[float] | None) -> list[float] | None:
+        """Publish a display-only target; delivery begins only at submit()."""
+        if self.finished or self.shutdown.is_set():
+            raise ValueError("simulation finished")
+        if destination is not None:
+            if (not isinstance(destination, list) or len(destination) != 3 or
+                    any(not isinstance(v, (int, float)) or isinstance(v, bool)
+                        or not math.isfinite(v) for v in destination)):
+                raise ValueError("preview must have three finite coordinates")
+            destination = list(map(float, destination))
+        with self.lock:
+            self._preview = destination
+            self.snapshot = {**self.snapshot, "preview": destination}
+            return destination
+
+    def preview(self) -> tuple[float, float, float] | None:
+        with self.lock:
+            return tuple(self._preview) if self._preview is not None else None
 
     @property
     def selection_version(self) -> int:
@@ -79,7 +99,10 @@ class LiveController:
             raise ValueError("destination must have three finite coordinates")
         if not isinstance(group, str) or not group.strip():
             raise ValueError("group must be nonempty")
-        self.commands.put(LiveRequest(ids, tuple(map(float, dest)), group.strip()))
+        with self.lock:
+            self._preview = None
+            self.snapshot = {**self.snapshot, "preview": None}
+            self.commands.put(LiveRequest(ids, tuple(map(float, dest)), group.strip()))
         return {"queued": ids}
 
     def tick(self, engine: Engine, t: float) -> None:
@@ -134,6 +157,7 @@ class LiveController:
                                   for b in engine.buildings]}
         with self.lock:
             snapshot["selected"] = self._selected.copy()
+            snapshot["preview"] = self._preview.copy() if self._preview is not None else None
             snapshot["selection_version"] = self._selection_version
             self.snapshot = snapshot
         self.shutdown.wait(self.tick_seconds)
@@ -197,7 +221,7 @@ def serve_live(config, *, host="127.0.0.1", port=8765, tick_seconds=.1,
             self.end_headers(); self.wfile.write(body)
 
         def do_POST(self):
-            if self.path not in ("/api/dispatch", "/api/selection"):
+            if self.path not in ("/api/dispatch", "/api/selection", "/api/preview"):
                 self.send_error(404); return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -208,6 +232,9 @@ def serve_live(config, *, host="127.0.0.1", port=8765, tick_seconds=.1,
                     raise ValueError("expected JSON object")
                 if self.path == "/api/selection":
                     result = {"selected": controller.set_selection(body.get("nodes"))}
+                    code = 200
+                elif self.path == "/api/preview":
+                    result = {"preview": controller.set_preview(body.get("destination"))}
                     code = 200
                 else:
                     result = controller.submit(body)

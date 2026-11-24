@@ -33,6 +33,26 @@ class TestLiveControl(unittest.TestCase):
                 control.stop()
                 thread.join(5)
 
+    def test_web_preview_is_shared_without_dispatching(self):
+        from skyfleet.viz.live_page import NATIVE_CONTROL_HTML
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = SimConfig(slaves=1, relays=0, tasks=0, blocks=1,
+                            log_path=str(Path(folder) / "preview.jsonl"))
+            control = LiveController(Engine(cfg).build())
+            with self.assertRaises(ValueError):
+                control.set_preview([1, float('nan'), 3])
+            self.assertEqual(control.set_preview([12, 24, 36]), [12., 24., 36.])
+            self.assertEqual(control.snapshot['preview'], [12., 24., 36.])
+            self.assertTrue(control.commands.empty())
+            control.submit({'nodes': ['S1'], 'destination': [12, 24, 36],
+                            'group': 'main'})
+            self.assertIsNone(control.snapshot['preview'])
+            control.set_preview([12, 24, 36])
+            control.set_preview(None)
+            self.assertIsNone(control.snapshot['preview'])
+            self.assertIn('id="minimap"', NATIVE_CONTROL_HTML)
+            self.assertIn('/api/preview', NATIVE_CONTROL_HTML)
+
     def test_native_viewer_close_waits_for_render_thread(self):
         from flightlab.viewer import native_viewer_session
         from unittest.mock import patch
@@ -147,6 +167,11 @@ class TestLiveControl(unittest.TestCase):
         self.assertEqual(scene.ngeom, 6)  # markers, labels, target, ns-3 hop
         self.assertEqual(scene.geoms[4].type, mujoco.mjtGeom.mjGEOM_SPHERE)
         self.assertEqual(scene.geoms[5].type, mujoco.mjtGeom.mjGEOM_CAPSULE)
+        display.overlay(scene, preview=(12., 24., 36.))
+        self.assertEqual(scene.ngeom, 8)
+        self.assertEqual(scene.geoms[5].type, mujoco.mjtGeom.mjGEOM_SPHERE)
+        self.assertEqual(list(scene.geoms[5].pos), [12., 24., 36.])
+        self.assertAlmostEqual(scene.geoms[5].rgba[0], 1.)
         display.update({"nodes": {"L": {"qpos": [0, 0, 10, 1, 0, 0, 0]},
                                   "S1": {"qpos": [2, 4, 10, 1, 0, 0, 0]}},
                         "radio_links": []})

@@ -315,16 +315,17 @@ def view_live(controller, *, refresh_s=1/30):
                 if keys.recenter or camera.following:
                     with viewer.lock():
                         camera.update(keys, selected, positions)
-                if (state is not last or keys.preview != last_preview or
+                preview = keys.preview if keys.preview is not None else controller.preview()
+                if (state is not last or preview != last_preview or
                         controller.selection_version != last_selection_version):
                     with viewer.lock():
                         if state is not last:
                             display.update(state)
                         display.overlay(viewer.user_scn, selected=selected,
-                                        preview=keys.preview)
+                                        preview=preview)
                     last = state
                     last_selection_version = controller.selection_version
-                    last_preview = keys.preview
+                    last_preview = preview
             viewer.sync()
             if controller.finished:
                 break
