@@ -18,6 +18,8 @@ class Building:
     id: str
     rect: Rect
     height: float
+    #: Elevated construction starts here; zero preserves legacy solid blocks.
+    base_height: float = 0.0
 
 
 def grid_buildings(area: float, blocks: int, gap: float,

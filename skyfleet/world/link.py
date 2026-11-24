@@ -73,7 +73,7 @@ class GeometricOcclusionLinkModel:
         start = (a.pos[0], a.pos[1])
         end = (b.pos[0], b.pos[1])
         for building in self.buildings:
-            if building.height < lowest_altitude:
+            if building.height < lowest_altitude or building.base_height > max(a.pos[2], b.pos[2]):
                 continue
             if segment_intersects_rect(start, end, building.rect):
                 return building.id

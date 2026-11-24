@@ -55,6 +55,34 @@ class TestRunCommand(unittest.TestCase):
         self.assertNotEqual(main(["run", "--config", "/nope.json"]), 0)
 
 
+class TestDispatchCommand(unittest.TestCase):
+    def test_dispatch_runs_selected_nodes_and_exports_replay(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = write_config(folder, duration=8.0, tasks=0, relays=0,
+                               slaves=2, area=120.0)
+            out = Path(folder) / "dispatch"
+            self.assertEqual(main([
+                "dispatch", "--config", cfg, "--nodes", "S1,S2",
+                "--destination", "60,0,30", "--at", "2.5",
+                "--group", "east", "--out", str(out),
+            ]), 0)
+            log = out / "dispatch.jsonl"
+            self.assertTrue(log.is_file())
+            records = [json.loads(line) for line in log.read_text().splitlines()]
+            issued = [r for r in records if r["kind"] == "CONTROL_ISSUED"]
+            self.assertEqual({r["node_id"] for r in issued}, {"S1", "S2"})
+            accepted = [r for r in records if r["kind"] == "CONTROL_ACCEPTED"]
+            self.assertEqual({r["node_id"] for r in accepted}, {"S1", "S2"})
+            self.assertTrue((out / "dispatch_3d.html").is_file())
+            from skyfleet.observe.replay import build_timeline
+            timeline = build_timeline(log)
+            self.assertEqual(timeline["groups"]["S1"], "east")
+            self.assertTrue(any(event[1] == "TOPOLOGY_CHANGE"
+                                for event in timeline["events"]))
+            self.assertTrue(any(event[1] == "CONTROL_ACCEPTED"
+                                for event in timeline["events"]))
+
+
 class TestMetricsCommand(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -70,6 +98,15 @@ class TestMetricsCommand(unittest.TestCase):
 
     def test_metrics_on_missing_log_returns_nonzero(self):
         self.assertNotEqual(main(["metrics", "--log", "/nope.jsonl"]), 0)
+
+
+class TestReplay3DCommand(unittest.TestCase):
+    def test_all_exports_3d_alongside_2d(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = write_config(folder, duration=2.0)
+            out = Path(folder) / "out"
+            self.assertEqual(main(["all", "--config", cfg, "--out", str(out)]), 0)
+            self.assertTrue((out / "replay" / "cli_3d.html").is_file())
 
 
 class TestArgumentParsing(unittest.TestCase):

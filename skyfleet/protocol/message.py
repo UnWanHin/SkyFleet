@@ -38,6 +38,7 @@ MSG_TYPES: dict[str, tuple[Qos, Rel]] = {
     "DELIVERY_CONFIRM": (Qos.Q1, Rel.R2),
     "ACK": (Qos.Q1, Rel.R2),
     "HEARTBEAT": (Qos.Q2, Rel.R1),
+    "ELECTION_VOTE": (Qos.Q1, Rel.R2),
     "MEMBER_UPDATE": (Qos.Q2, Rel.R1),
     "ROUTE_UPDATE": (Qos.Q2, Rel.R1),
     "JOIN_REQUEST": (Qos.Q2, Rel.R1),

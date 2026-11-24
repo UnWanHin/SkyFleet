@@ -1,0 +1,64 @@
+{
+  "type": "FeatureCollection",
+  "skyfleet_units": "metres",
+  "name": "D5 synthetic urban district",
+  "skyfleet_terrain": {
+    "type": "visual-only",
+    "bounds": [-100, -100, 180, 150],
+    "hill": [130, 105, 10, 48],
+    "roads": [[-105, 25, 285, 12], [17, -95, 12, 235], [101, -95, 12, 235]],
+    "park": [-82, 64, 55, 52]
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "id": "B0",
+      "properties": {
+        "height": 60
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              40,
+              -10
+            ],
+            [
+              60,
+              -10
+            ],
+            [
+              60,
+              10
+            ],
+            [
+              40,
+              10
+            ],
+            [
+              40,
+              -10
+            ]
+          ]
+        ]
+      }
+    },
+    {"type":"Feature","id":"W1","properties":{"height":45},"geometry":{"type":"Polygon","coordinates":[[[-86,-62],[-67,-62],[-67,-38],[-86,-38],[-86,-62]]]}},
+    {"type":"Feature","id":"W2","properties":{"height":75},"geometry":{"type":"Polygon","coordinates":[[[-58,-65],[-37,-65],[-37,-39],[-58,-39],[-58,-65]]]}},
+    {"type":"Feature","id":"W3","properties":{"height":32},"geometry":{"type":"Polygon","coordinates":[[[-88,-22],[-60,-22],[-60,5],[-88,5],[-88,-22]]]}},
+    {"type":"Feature","id":"W4","properties":{"height":91},"geometry":{"type":"Polygon","coordinates":[[[-53,-22],[-30,-22],[-30,7],[-53,7],[-53,-22]]]}},
+    {"type":"Feature","id":"S1","properties":{"height":52},"geometry":{"type":"Polygon","coordinates":[[[38,-72],[58,-72],[58,-49],[38,-49],[38,-72]]]}},
+    {"type":"Feature","id":"S2","properties":{"height":112},"geometry":{"type":"Polygon","coordinates":[[[69,-79],[87,-79],[87,-48],[69,-48],[69,-79]]]}},
+    {"type":"Feature","id":"S3","properties":{"height":68},"geometry":{"type":"Polygon","coordinates":[[[43,-42],[64,-42],[64,-24],[43,-24],[43,-42]]]}},
+    {"type":"Feature","id":"E1","properties":{"height":54},"geometry":{"type":"Polygon","coordinates":[[[126,-67],[147,-67],[147,-43],[126,-43],[126,-67]]]}},
+    {"type":"Feature","id":"E2","properties":{"height":96},"geometry":{"type":"Polygon","coordinates":[[[122,-22],[145,-22],[145,5],[122,5],[122,-22]]]}},
+    {"type":"Feature","id":"N1","properties":{"height":48},"geometry":{"type":"Polygon","coordinates":[[[-10,82],[10,82],[10,104],[-10,104],[-10,82]]]}},
+    {"type":"Feature","id":"N2","properties":{"height":82},"geometry":{"type":"Polygon","coordinates":[[[37,95],[59,95],[59,117],[37,117],[37,95]]]}},
+    {"type":"Feature","id":"N3","properties":{"height":38},"geometry":{"type":"Polygon","coordinates":[[[80,87],[99,87],[99,110],[80,110],[80,87]]]}},
+    {"type":"Feature","id":"N4","properties":{"height":63},"geometry":{"type":"Polygon","coordinates":[[[122,69],[144,69],[144,90],[122,90],[122,69]]]}},
+    {"type":"Feature","id":"ARCH_WEST","properties":{"height":67},"geometry":{"type":"Polygon","coordinates":[[[30,64],[39,64],[39,86],[30,86],[30,64]]]}},
+    {"type":"Feature","id":"ARCH_EAST","properties":{"height":73},"geometry":{"type":"Polygon","coordinates":[[[61,64],[70,64],[70,86],[61,86],[61,64]]]}},
+    {"type":"Feature","id":"ARCH_BEAM","properties":{"height":65,"base_height":48},"geometry":{"type":"Polygon","coordinates":[[[39,64],[61,64],[61,86],[39,86],[39,64]]]}}
+  ]
+}

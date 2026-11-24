@@ -1,0 +1,14 @@
+{
+  "name": "ns3_mujoco",
+  "description": "ns-3 ad-hoc Wi-Fi and MuJoCo coupled multi-drone scenario",
+  "seed": 1,
+  "env_seed": 1,
+  "duration": 60.0,
+  "log_path": "out/logs/ns3_mujoco.jsonl",
+  "physics_movers": true,
+  "network_backend": "ns3",
+  "slaves": 8,
+  "relays": 2,
+  "tasks": 20,
+  "motor_guard_ratio": 0.8
+}

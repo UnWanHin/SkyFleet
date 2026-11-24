@@ -23,6 +23,13 @@ def model(buildings=(), max_range=1000.0, min_quality=0.05):
 
 
 class TestOcclusion(unittest.TestCase):
+    def test_archway_air_gap_clear_below_elevated_beam(self):
+        beam = Building("beam", (40, 65, 20, 20), height=65, base_height=48)
+        low = model([beam]).evaluate(node("A", 30, 75, 30), node("B", 70, 75, 30), 0)
+        high = model([beam]).evaluate(node("A", 30, 75, 55), node("B", 70, 75, 55), 0)
+        self.assertFalse(low.obstructed)
+        self.assertTrue(high.obstructed)
+
     def test_clear_line_is_not_obstructed(self):
         q = model([WALL]).evaluate(node("A", 0, 50, 100), node("B", 100, 50, 100), 0.0)
         self.assertFalse(q.obstructed)

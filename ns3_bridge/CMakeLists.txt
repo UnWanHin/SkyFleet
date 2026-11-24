@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.20)
+project(skyfleet_ns3_bridge LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 23)
+find_package(ns3 3.46 REQUIRED COMPONENTS core network mobility wifi)
+add_executable(skyfleet-ns3-bridge bridge.cc)
+target_link_libraries(skyfleet-ns3-bridge PRIVATE ns3::core ns3::network ns3::mobility ns3::wifi)

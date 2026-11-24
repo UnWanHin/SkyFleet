@@ -36,7 +36,7 @@ class SwarmLayout:
     altitude: float = 1.2
 
 
-def build_swarm_xml(layout: SwarmLayout) -> str:
+def build_swarm_xml(layout: SwarmLayout, buildings=()) -> str:
     """生成 N 架四旋翼的 MJCF。
 
     每架的 body / joint / site 名字都带编号后缀，避免重名——MuJoCo 里同名
@@ -71,6 +71,19 @@ def build_swarm_xml(layout: SwarmLayout) -> str:
       <geom type="capsule" fromto="0 0 0 -.11  .11 0" size=".006" mass="0.0015" rgba=".15 .15 .17 1"/>{''.join(rotors)}
     </body>""")
 
+    # Render-only bodies: collision disabled so independent flight solvers
+    # remain the sole physics authority. Elevated beams preserve open arches.
+    city = []
+    for index, building in enumerate(buildings):
+        x, y, w, d = building.rect
+        bottom, top = building.base_height, building.height
+        if w <= 0 or d <= 0 or top <= bottom:
+            raise ValueError("building needs positive width, depth and height")
+        city.append(f'<geom name="city_{index}" type="box" '
+                    f'pos="{x + w/2} {y + d/2} {(bottom + top)/2}" '
+                    f'size="{w/2} {d/2} {(top - bottom)/2}" '
+                    f'rgba=".37 .45 .55 1" contype="0" conaffinity="0"/>')
+
     actuators = []
     for i in range(layout.count):
         for j in range(4):
@@ -97,6 +110,7 @@ def build_swarm_xml(layout: SwarmLayout) -> str:
            diffuse=".8 .8 .8"/>
     <geom name="ground" type="plane" size="80 80 .1" material="ground"/>
 {''.join(robots)}
+{chr(10).join(city)}
   </worldbody>
   <actuator>
 {chr(10).join(actuators)}
@@ -131,11 +145,11 @@ class SwarmSim:
 
     def __init__(self, layout: SwarmLayout | None = None,
                  params: QuadParams = DEFAULT_PARAMS,
-                 gains: Gains | None = None) -> None:
+                 gains: Gains | None = None, buildings=()) -> None:
         self.layout = layout or SwarmLayout()
         self.params = params
         self.gains = gains or Gains()
-        xml = build_swarm_xml(self.layout)
+        xml = build_swarm_xml(self.layout, buildings)
         self.model = mujoco.MjModel.from_xml_string(xml)
         self.data = mujoco.MjData(self.model)
         self.dt = self.model.opt.timestep

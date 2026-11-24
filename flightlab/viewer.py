@@ -17,6 +17,8 @@ from __future__ import annotations
 import math
 import os
 import time
+import threading
+from contextlib import contextmanager
 
 os.environ.setdefault("MUJOCO_GL", "glfw")
 
@@ -27,6 +29,308 @@ import numpy as np                                # noqa: E402
 from flightlab.params import DEFAULT as PARAMS     # noqa: E402
 from flightlab.sim import QuadrotorSim             # noqa: E402
 from flightlab.swarm import SwarmLayout, SwarmSim  # noqa: E402
+
+
+class LiveSwarmDisplay:
+    """A display-only MJCF mirror; SkyFleet's per-aircraft simulators own physics.
+
+    Call update on the viewer thread with a locked snapshot from LiveController.
+    Never call SwarmSim.step here: that would simulate a second, divergent fleet.
+    """
+
+    def __init__(self, ids, buildings=(), *, visual_scale=4.):
+        if not math.isfinite(visual_scale) or visual_scale <= 0:
+            raise ValueError("visual_scale must be finite and positive")
+        self.ids = tuple(ids)
+        self.visual_scale = visual_scale
+        self.swarm = SwarmSim(SwarmLayout(count=len(self.ids)),
+                              buildings=buildings)
+        self.model, self.data = self.swarm.model, self.swarm.data
+        # This model is a display-only mirror. Scale body-local offsets and
+        # geometry, never free-joint qpos or the authoritative flight models.
+        if visual_scale != 1:
+            for body_id in range(1, self.model.nbody):
+                name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY,
+                                         body_id) or ""
+                if "_rotor" in name:
+                    self.model.body_pos[body_id] *= visual_scale
+            for geom_id in range(self.model.ngeom):
+                body_id = int(self.model.geom_bodyid[geom_id])
+                if self._drone_body(body_id):
+                    self.model.geom_size[geom_id] *= visual_scale
+                    self.model.geom_pos[geom_id] *= visual_scale
+            mujoco.mj_setConst(self.model, self.data)
+        self._qpos = self.swarm._qpos
+        self._rotors = [[self.model.jnt_qposadr[
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT,
+                              f"d{i}_motor{j}")] for j in range(4)]
+            for i in range(len(self.ids))]
+        self.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
+        self.latest = None
+
+    def update(self, snapshot):
+        for i, name in enumerate(self.ids):
+            node = snapshot.get("nodes", {}).get(name)
+            if node is None:
+                continue
+            pose = node.get("qpos")
+            if pose is None:
+                raise ValueError("native viewer requires physical qpos per aircraft")
+            if len(pose) != 7:
+                raise ValueError("invalid free-joint qpos")
+            self.data.qpos[self._qpos[i]:self._qpos[i] + 7] = pose
+            for index, angle in zip(self._rotors[i], node.get("rotors", ())):
+                self.data.qpos[index] = angle
+        mujoco.mj_forward(self.model, self.data)
+        self.latest = snapshot
+
+    @staticmethod
+    def _geom(scene, kind, size, pos, color):
+        if scene.ngeom >= scene.maxgeom:
+            return None
+        geom = scene.geoms[scene.ngeom]
+        mujoco.mjv_initGeom(geom, kind, np.asarray(size, dtype=float),
+                            np.asarray(pos, dtype=float), np.eye(3).ravel(),
+                            np.asarray(color, dtype=np.float32))
+        scene.ngeom += 1
+        return geom
+
+    def _drone_body(self, body_id):
+        while body_id > 0:
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY,
+                                     body_id) or ""
+            if name.startswith("d") and name[1:].isdigit():
+                return True
+            body_id = int(self.model.body_parentid[body_id])
+        return False
+
+    def body_to_node(self, body_id):
+        while body_id > 0:
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY,
+                                     body_id)
+            if name and name.startswith("d") and name[1:].isdigit():
+                index = int(name[1:])
+                return self.ids[index] if index < len(self.ids) else None
+            body_id = int(self.model.body_parentid[body_id])
+        return None
+
+    def overlay(self, scene, *, selected=(), preview=None):
+        """Draw identifiers, selected rings, preview and accepted ns-3 hops."""
+        scene.ngeom = 0
+        if not self.latest:
+            return
+        nodes = self.latest.get("nodes", {})
+        for i, name in enumerate(self.ids):
+            node = nodes.get(name)
+            if node is None:
+                continue
+            pos = node["qpos"][:3]
+            # A colored marker distinguishes L / relays / selected slaves.
+            color = (.95, .3, .2, .9) if name == "L" else (
+                (.35, .9, .5, .85) if name.startswith("R") else (.3, .65, 1., .85))
+            self._geom(scene, mujoco.mjtGeom.mjGEOM_SPHERE,
+                       (.45, .45, .45), (pos[0], pos[1], pos[2] + 1.5), color)
+            label = self._geom(scene, mujoco.mjtGeom.mjGEOM_LABEL,
+                               (.1, .1, .1), (pos[0], pos[1], pos[2] + 3),
+                               (1., 1., 1., 1.))
+            if label is not None:
+                label.label = name
+            if name in selected:
+                self._geom(scene, mujoco.mjtGeom.mjGEOM_CYLINDER,
+                           (2., .08, .08), pos, (1., .9, .08, .85))
+            target = node.get("target")
+            if target is not None:
+                self._geom(scene, mujoco.mjtGeom.mjGEOM_SPHERE,
+                           (.8, .8, .8), target, (.1, 1., .35, .95))
+        if preview is not None:
+            self._geom(scene, mujoco.mjtGeom.mjGEOM_SPHERE,
+                       (1.3, 1.3, 1.3), preview, (1., .78, .1, .4))
+            label = self._geom(scene, mujoco.mjtGeom.mjGEOM_LABEL,
+                               (.1, .1, .1), (preview[0], preview[1],
+                                              preview[2] + 3), (1., 1., .4, 1.))
+            if label is not None:
+                label.label = str(tuple(round(float(x), 1) for x in preview))
+        for a, b in self.latest.get("radio_links", []):
+            if a not in nodes or b not in nodes:
+                continue
+            start, end = nodes[a]["qpos"][:3], nodes[b]["qpos"][:3]
+            geom = self._geom(scene, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                              (.1, .1, .1), start, (.1, 1., .55, .85))
+            if geom is not None:
+                mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                                     .10, np.asarray(start), np.asarray(end))
+
+
+class LiveCamera:
+    """Close-up camera framing and optional follow of the selected drone."""
+
+    def __init__(self, camera):
+        self.camera = camera
+        self.following = False
+
+    def start(self, position):
+        self.camera.lookat[:] = position
+        self.camera.distance = 25.
+        self.camera.elevation = -25.
+
+    def update(self, keys, selected, positions):
+        if keys.recenter:
+            keys.recenter = False
+            self.following = True
+            self.camera.distance = 25.
+            self.camera.elevation = -25.
+        if self.following and len(selected) == 1 and selected[0] in positions:
+            self.camera.lookat[:] = positions[selected[0]]
+        elif self.following and len(selected) != 1:
+            self.following = False
+
+
+class LiveKeys:
+    """Passive-viewer keyboard events, processed on the owning Python thread."""
+
+    def __init__(self, controller, ids):
+        import queue
+        self.controller = controller
+        self.ids = tuple(ids)
+        self.events = queue.SimpleQueue()
+        self.preview = None
+        self.recenter = False
+
+    def __call__(self, keycode):
+        # MuJoCo only forwards keycode. Capture modifier *at callback time*;
+        # querying it later on the render loop may miss a released Shift key.
+        import glfw
+        window = glfw.get_current_context()
+        shift = bool(window and (glfw.get_key(window, glfw.KEY_LEFT_SHIFT) == glfw.PRESS or
+                                 glfw.get_key(window, glfw.KEY_RIGHT_SHIFT) == glfw.PRESS))
+        self.events.put((keycode, shift))
+
+    def drain(self, focus, positions):
+        events = []
+        while not self.events.empty():
+            events.append(self.events.get_nowait())
+        if events:
+            self.process(events, focus, positions)
+
+    def process(self, events, focus, positions):
+        for event in events:
+            key, shift = event if isinstance(event, tuple) else (event, False)
+            if key in (48, 65):  # 0 / A
+                self.controller.set_selection(list(self.ids))
+            elif key == 49:  # 1
+                self.controller.set_selection([n for n in self.ids if n == 'L'])
+            elif key == 50:  # 2
+                self.controller.set_selection([n for n in self.ids if n.startswith('R')])
+            elif key == 51:  # 3
+                self.controller.set_selection([n for n in self.ids if n.startswith('S')])
+            elif key == 258:  # Tab; viewer forwards keycodes, not modifiers
+                current = self.controller.selected()
+                index = self.ids.index(current[0]) if len(current) == 1 else -1
+                direction = -1 if shift else 1
+                self.controller.set_selection([self.ids[(index + direction) % len(self.ids)]])
+            elif key == 67:  # C: recenter and follow a single selected drone
+                self.recenter = True
+            elif key == 70:  # F: camera focus, altitude of selected drone
+                selected = self.controller.selected()
+                if selected:
+                    point = positions.get(selected[0])
+                    if point is not None:
+                        self.preview = (float(focus[0]), float(focus[1]),
+                                        float(point[2]))
+            elif key in (91, 93) and self.preview is not None:
+                delta = -5. if key == 91 else 5.
+                self.preview = (self.preview[0], self.preview[1],
+                                max(0., self.preview[2] + delta))
+            elif key in (257, 335) and self.preview is not None:
+                selected = self.controller.selected()
+                if selected:
+                    self.controller.submit({'nodes': selected,
+                                            'destination': list(self.preview),
+                                            'group': 'main'})
+                    self.preview = None
+            elif key == 256:
+                self.preview = None
+
+
+@contextmanager
+def native_viewer_session(model, data, **kwargs):
+    """Close passive Viewer and await MuJoCo's owned render thread teardown.
+
+    MuJoCo 3.17.0 Handle.close only signals exit; the GLFW/EGL worker may
+    still swap buffers when Python's atexit terminates GLFW. Capture the
+    launch's native worker, rather than waiting on unrelated threads.
+    """
+    before = set(threading.enumerate())
+    viewer = mujoco.viewer.launch_passive(model, data, **kwargs)
+    workers = [thread for thread in set(threading.enumerate()) - before
+               if getattr(thread, 'name', '').endswith('(_launch_internal)')]
+    try:
+        yield viewer
+    finally:
+        viewer.close()
+        for worker in workers:
+            worker.join()
+
+
+def view_live(controller, *, refresh_s=1/30):
+    """Run the native GLFW window on the main thread, consuming live poses."""
+    display = LiveSwarmDisplay(sorted(controller.engine.nodes),
+                               controller.engine.buildings)
+    keys = LiveKeys(controller, display.ids)
+    with native_viewer_session(display.model, display.data,
+                               key_callback=keys) as viewer:
+        camera = LiveCamera(viewer.cam)
+        leader = controller.engine.leader_id
+        with viewer.lock():
+            camera.start(controller.engine.nodes[leader].pos)
+            print(f"MuJoCo camera lookat={tuple(viewer.cam.lookat)} "
+                  f"distance={viewer.cam.distance:.1f}m "
+                  f"elevation={viewer.cam.elevation:.1f}deg", flush=True)
+        last = None
+        last_selected_body = 0
+        last_selection_version = -1
+        last_preview = None
+        logged_pose_range = False
+        while viewer.is_running() and not controller.shutdown.is_set():
+            with controller.lock:
+                state = controller.snapshot
+            with viewer.lock():
+                selected_body = viewer.perturb.select
+                focus = tuple(viewer.cam.lookat)
+            if state.get("nodes"):
+                if selected_body and selected_body != last_selected_body:
+                    node = display.body_to_node(selected_body)
+                    if node is not None:
+                        controller.set_selection([node])
+                last_selected_body = selected_body
+                positions = {name: node['qpos'][:3] for name, node
+                             in state['nodes'].items() if 'qpos' in node}
+                if not logged_pose_range and len(positions) == len(display.ids):
+                    bounds = np.asarray(list(positions.values()))
+                    print(f"MuJoCo drone qpos bounds min={bounds.min(axis=0)} "
+                          f"max={bounds.max(axis=0)}", flush=True)
+                    logged_pose_range = True
+                keys.drain(focus, positions)
+                selected = controller.selected()
+                if keys.recenter or camera.following:
+                    with viewer.lock():
+                        camera.update(keys, selected, positions)
+                if (state is not last or keys.preview != last_preview or
+                        controller.selection_version != last_selection_version):
+                    with viewer.lock():
+                        if state is not last:
+                            display.update(state)
+                        display.overlay(viewer.user_scn, selected=selected,
+                                        preview=keys.preview)
+                    last = state
+                    last_selection_version = controller.selection_version
+                    last_preview = keys.preview
+            viewer.sync()
+            if controller.finished:
+                break
+            controller.shutdown.wait(refresh_s)
+        controller.stop()
+        controller.join()  # No engine/HTTP worker can touch the viewer at close.
 
 
 class _Keys:

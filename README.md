@@ -27,6 +27,10 @@ python3 docs/report/build_docx.py                    # HTML -> docx（零依赖 
 
 ## 快速开始
 
+> ns-3 通信 + MuJoCo 四旋翼的联合场景见 [ns3_bridge/README.md](ns3_bridge/README.md)：
+> `network_backend=ns3` 时封包走 ns-3 Wi-Fi，飞行状态仍由 MuJoCo 推进。
+> 以下默认 `all` 命令仍使用原来的纯 Python 通信与运动学模型。
+
 ```bash
 # 1) 跑基线场景（600 s 虚拟时间，约 10 s 出结果）
 python3 -m skyfleet.cli all --out out
@@ -46,7 +50,8 @@ python3 -m skyfleet.cli all --config skyfleet/scenarios/fault_chain.json --out o
 out/logs/<name>.jsonl           事件溯源日志（唯一事实来源）
 out/logs/<name>.metrics.txt     指标报告
 out/figures/<name>/*.png|svg    报告插图（7 张，中英文标签）
-out/replay/<name>.html          单文件自包含动态回放（浏览器直接打开）
+out/replay/<name>.html          单文件二维动态回放（浏览器直接打开）
+out/replay/<name>_3d.html       单文件 WebGL2 三维城市/飞行回放
 ```
 
 其中 `<name>` 为 `baseline` / `stress` / `fault`。
@@ -137,8 +142,10 @@ docs/superpowers/
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests -t .            # 系统 Python，跳过 5 个画图测试
-.venv/bin/python -m unittest discover -s tests -t .   # 含可视化，711 passed
+python3 -m unittest discover -s tests -t .            # 系统 Python；缺少可选依赖时跳过相应测试
+.venv/bin/python -m unittest discover -s tests -t .   # 有 MuJoCo/NumPy；未配置桥接时跳过 ns-3 测试
+SKYFLEET_NS3_BRIDGE="$PWD/.build/ns3-bridge/skyfleet-ns3-bridge" \
+  .venv/bin/python -m unittest discover -s tests -t .  # 同时执行 ns-3 联动测试
 ```
 
 **确定性是第一验收项**：同一 `master_seed` 连续两次运行，规范化日志的
@@ -194,7 +201,42 @@ ACK 也回不来，所以投递完成后先爬升脱离遮挡再上报。遮挡�
 检测到 CJK 字体时用中文标签，否则自动退回英文，不会出现方块字。
 
 回放页面是**单个自包含 HTML**，数据内嵌，不依赖网络与外部资源，
-双击即可用浏览器打开。
+双击即可用浏览器打开。`all` 同时输出二维和 WebGL2 三维回放；也可
+单独运行 `python3 -m skyfleet.cli replay3d --log out/logs/baseline.jsonl
+--out out/replay/baseline_3d.html`。三维回放从日志重建建筑、飞行轨迹和
+通信跳段，不是实时 MuJoCo 窗口。多机派遣可用 `dispatch` 命令重算一段可追溯仿真：
+
+```bash
+.venv/bin/python -m skyfleet.cli dispatch \
+  --config skyfleet/scenarios/ns3_mujoco.json \
+  --nodes S1,S2,S3 --destination 60,0,30 --at 2 --group east \
+  --out out/dispatch
+```
+
+D5 合成拱廊示例：加入 `--city skyfleet/scenarios/d5_urban_city.geojson --through 50,75,30`，
+並把 `--destination` 設為 `50,92,30`；通道中心與出口集結點各自指定。
+`--through X,Y,Z` 可依場景樓塊幾何規劃排隊穿越窄通道、離開後回復矩陣；
+若使用 ns-3，控制指令必須實際收到才改航線。`TOPOLOGY_CHANGE` 記錄的是幾何估算的
+無線連通分量，編組標籤則是任務分組，兩者都不代表建立了獨立組長／共識協議。
+輸出包含 `dispatch.jsonl` 和 `dispatch_3d.html`。運行中互動請啟動獨立控制頁：
+
+```bash
+SKYFLEET_NS3_BRIDGE="$PWD/.build/ns3-bridge/skyfleet-ns3-bridge" \
+  .venv/bin/python -m skyfleet.cli live \
+  --config skyfleet/scenarios/ns3_mujoco.json \
+  --city skyfleet/scenarios/d5_urban_city.geojson \
+  --duration 120 --tick-seconds 0.1 --port 8765 --viewer mujoco
+```
+
+MuJoCo 會開啟原生 3D 即時視窗，提供旋轉、縮放與自由視角；同時開啟 `http://127.0.0.1:8765/` 作為輕量派遣控制台。可選 L、R1/R2、S1~S8，在控制台輸入 X/Y/Z 並送出；L 使用本地導航命令，R/S 仍需經 ns-3 Wi-Fi 實際接收才變更航線。3D 姿態／旋翼來自每架物理模擬器的 qpos；樓塊是展示幾何，不作為 MuJoCo 物理碰撞體；綠線代表最近 1.5 秒被協議接受的 ns-3 封包，而非射頻強度／永久連通。3D 中機號標籤與選中光環同步控制台勾選；原生雙擊機身選單機，`Tab` 循環，`1` 選 L、`2` 選中繼、`3` 選全部從機、`0`/`A` 全選。預設相機對準 L，距離 25 m；`C` 居中並跟隨目前單選機。鼠標左鍵拖動旋轉、右鍵拖動平移、滾輪縮放。展示模型預設放大 4 倍（`LiveSwarmDisplay(..., visual_scale=4)`），不改物理模型或根關節世界座標；`F` 用相機焦點 XY 與選中機高度建立黃色半透明預覽，`[`/`]` 每次調整高度 5 m，`Enter` 派遣、`Esc` 取消；收到並執行的目標顯示為綠色球。
+原生視窗以快照刷新物理 3D 機身；關閉視窗會停止仿真並等待 ns-3 與 MuJoCo 渲染執行緒退出。控制台約每 300 ms 更新編隊狀態與最近接收的 ns-3 跳段；命令進入同一段正在運行的模擬，R/S 透過無線封包送達後才套用。可設 `--log out/live/dispatch.jsonl` 留存事件。
+`--adaptive`（CLI 派遣）或控制頁命令啟用運動週期幾何再評估：開闊採矩陣、
+窄通道採單列、碰撞風險時 HOLD；現階段採用已知矩形樓塊及節點位置，
+物理慣性、感測器未知障礙與連續時間避撞不在此模型的保證內。
+D5/ns-3/MuJoCo 的高頻採樣對照場景
+和独立三维回放命令见 `ns3_bridge/README.md`；合成城区版本在
+`skyfleet/scenarios/d5_urban_city.geojson`，包含 14 栋楼、道路、公园和丘陵。
+道路与丘陵是三维回放的视觉层，尚未参与 MuJoCo 碰撞或无线传播。
 
 ---
 

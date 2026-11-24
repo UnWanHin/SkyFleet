@@ -23,6 +23,11 @@ class Scheduler:
         #: 在每个虚拟时刻的所有事件处理完之后回调。
         #: 共享信道的竞争结算依赖它：同一时刻的并发发送必须一起判定。
         self.on_timestamp_end: Callable[[float], None] | None = None
+        #: Called before moving to the next event time, to import external
+        #: simulator events whose timestamps precede the queued event.
+        self.before_time: Callable[[float], None] | None = None
+        #: Optional cooperative cancellation, checked at event boundaries.
+        self.stop_requested: Callable[[], bool] | None = None
 
     @property
     def now(self) -> float:
@@ -58,9 +63,16 @@ class Scheduler:
         """事件循环。until 为虚拟时间上界（晚于该时刻的事件不执行）。"""
         current: float | None = None
         while self._heap:
+            if self.stop_requested is not None and self.stop_requested():
+                break
             t, _, ev = self._heap[0]
             if until is not None and t > until:
                 break
+            if self.before_time is not None and t > self._now:
+                self.before_time(t)
+                # The external simulator may have inserted earlier events.
+                if self._heap[0][2] is not ev:
+                    continue
             heapq.heappop(self._heap)
             if ev.cancelled:
                 continue

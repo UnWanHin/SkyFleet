@@ -19,6 +19,8 @@ REPLAY_MESSAGE_KINDS = frozenset({
     "TASK_CREATE", "TASK_ASSIGN", "TASK_REASSIGN", "TASK_PICKUP",
     "TASK_DELIVER", "STATUS_CHANGE", "OCCLUSION_ENTER", "OCCLUSION_EXIT",
     "HEARTBEAT_MISS", "SAFETY_ACTION", "NODE_JOIN", "NODE_LEAVE",
+    "CONTROL_ISSUED", "CONTROL_ACCEPTED", "CONTROL_ARRIVED",
+    "GROUP_CHANGE", "TOPOLOGY_CHANGE", "FORMATION_CHANGE",
 })
 
 
@@ -26,7 +28,7 @@ def build_timeline(log_path: str | Path) -> dict[str, Any]:
     events = list(read_log(log_path))
 
     world: dict[str, Any] = {"area": 0.0, "duration": 0.0, "seed": 0,
-                             "leader_id": "", "buildings": []}
+                             "leader_id": "", "buildings": [], "groups": {}}
     nodes: dict[str, dict[str, Any]] = {}
     tasks: dict[str, dict[str, Any]] = {}
     messages: list[list[Any]] = []
@@ -41,6 +43,9 @@ def build_timeline(log_path: str | Path) -> dict[str, Any]:
             world["seed"] = event.get("seed", 0)
             world["leader_id"] = event.get("leader_id", "")
             world["buildings"] = event.get("buildings", [])
+            world["groups"] = dict(event.get("groups", {}))
+            if "terrain" in event:
+                world["terrain"] = event["terrain"]
             for node_id, role, pos in event.get("nodes", []):
                 nodes[node_id] = {
                     "role": role, "session": "", "samples": [[0.0, *pos]],
@@ -72,6 +77,11 @@ def build_timeline(log_path: str | Path) -> dict[str, Any]:
                              event.get("status", "")])
             continue
 
+        if kind == "GROUP_CHANGE":
+            if "node_id" in event:
+                world["groups"][event["node_id"]] = event["group_id"]
+            for node_id in event.get("members", []):
+                world["groups"][node_id] = event.get("group_id", "main")
         if kind == "TASK_CREATE":
             tasks[event["task_id"]] = {
                 "origin": event["origin"], "destination": event["destination"],
@@ -100,9 +110,13 @@ def build_timeline(log_path: str | Path) -> dict[str, Any]:
                 task["state"] = "REASSIGNED"
 
         if kind in REPLAY_MESSAGE_KINDS and len(messages) < MESSAGE_CAP:
-            messages.append([t, kind, event.get("node_id", msg_src(event)),
-                             event.get("reason") or event.get("msg_type") or
-                             event.get("task_id") or event.get("status") or ""])
+            detail = (event.get("reason") or event.get("msg_type") or
+                      event.get("task_id") or event.get("status") or
+                      event.get("group_id") or "")
+            if kind == "TOPOLOGY_CHANGE":
+                detail = "連通分量 " + " / ".join(
+                    ",".join(component) for component in event.get("components", []))
+            messages.append([t, kind, event.get("node_id", msg_src(event)), detail])
 
     return {
         **world,

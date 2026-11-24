@@ -102,6 +102,20 @@ class FlightlabMover:
         gains = replace(sim.gains, v_max=speed)
         sim.gains = sim.controller.gains = sim.esc.gains = gains
 
+    def visual_pose(self) -> dict:
+        """Read the authoritative MuJoCo root joint and rotor joint coordinates.
+
+        An unstarted aircraft remains at its seeded position and identity pose;
+        creating an idle MuJoCo instance only for rendering would change the
+        simulation's lazy-start behavior.
+        """
+        if not self._ready:
+            return {"qpos": [*self.node.pos, 1.0, 0.0, 0.0, 0.0],
+                    "rotors": [0.0] * 4}
+        sim = self._sim
+        return {"qpos": [float(v) for v in sim.data.qpos[:7]],
+                "rotors": [float(v) for v in sim.data.qpos[7:11]]}
+
     def flight_telemetry(self) -> dict | None:
         """Return physical measurements only after the simulator starts."""
         if not self._ready:

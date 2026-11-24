@@ -115,6 +115,41 @@ class TestTimestampHook(unittest.TestCase):
         s.run()
 
 
+class TestExternalClock(unittest.TestCase):
+    def test_external_receive_at_final_timestamp_is_processed(self):
+        s, seen = Scheduler(), []
+        s.subscribe("rx", lambda ev: seen.append(ev.t))
+        s.schedule_at(1.0, "end")
+        injected = False
+
+        def advance(target):
+            nonlocal injected
+            if target == 1.0 and not injected:
+                injected = True
+                s.schedule_at(1.0, "rx")
+
+        s.before_time = advance
+        s.run(until=1.0)
+        self.assertEqual(seen, [1.0])
+
+    def test_external_event_runs_before_next_queued_timestamp(self):
+        s, seen = Scheduler(), []
+        s.subscribe("e", lambda ev: seen.append(ev.t))
+        s.schedule_at(1.0, "e")
+        s.schedule_at(3.0, "e")
+        injected = False
+
+        def advance(target):
+            nonlocal injected
+            if target == 3.0 and not injected:
+                injected = True
+                s.schedule_at(2.0, "e")
+
+        s.before_time = advance
+        s.run()
+        self.assertEqual(seen, [1.0, 2.0, 3.0])
+
+
 class TestDeterminism(unittest.TestCase):
     def test_two_runs_of_same_schedule_are_identical(self):
         def build():

@@ -57,6 +57,12 @@ EV_RX = "rx"
 EV_KILL = "kill"
 EV_REVIVE = "revive"
 EV_CHANNEL = "chan"
+EV_NS3_END = "ns3_end"
+EV_ELECTION_BALLOT = "election_ballot"
+EV_ELECTION_SAFETY = "election_safety"
+EV_DISPATCH = "dispatch"
+EV_LOCAL_DISPATCH = "local_dispatch"
+EV_TOPOLOGY = "topology"
 
 #: 广播目的地址。主节点心跳用一条广播覆盖全员，而不是逐节点单播
 #: （后者会把信道负载放大 N 倍，冲突率被严重高估）。
@@ -112,6 +118,7 @@ class _Rx:
     receiver: NodeAgent
     quality: float
     attempt: Any
+    radio_from: str | None = None
 
 
 #: 规格 §3.2 规定的三种中继布点。
@@ -275,15 +282,43 @@ class Engine:
                 "请设置 auth_key，或关闭 auth_enabled。")
         self._sample_countdown = 0
         self._last_flight_correction: dict[str, float] = {}
+        if config.network_backend not in ("classic", "ns3"):
+            raise ValueError(f"unknown network_backend: {config.network_backend!r}")
+        self._ns3 = None
+        self._ns3_pending: dict[str, tuple[Msg, NodeAgent, float]] = {}
+        self._ns3_hops: dict[str, str] = {}
+        self._ns3_serial = 0
+        if (not isinstance(config.election_votes_required, int) or
+                config.election_votes_required < 0):
+            raise ValueError("election_votes_required must be a nonnegative integer")
+        self._election_votes: dict[tuple[str, int], set[str]] = {}
+        self._election_degraded = False
+        self._election_ballot_sent: set[tuple[str, int]] = set()
+        self._dispatches: list[tuple[
+            float, tuple[str, ...], tuple[float, float, float], str,
+            list[tuple[float, float, float]] | None, bool]] = []
+        self._group_ids: dict[str, str] = {}
+        self._control_routes: set[str] = set()
+        self._last_components: tuple[tuple[str, ...], ...] | None = None
+        self._last_group_signature: dict[str, tuple[str, ...]] = {}
+        self._topology_enabled = False
+        self._adaptive_targets: dict[str, tuple[float, float, float]] = {}
+        self._adaptive_modes: dict[str, str] = {}
+        self.live_hook = None
+        self.radio_observer = None  # optional accepted ns-3 reception callback
 
     # ================= 构建 =================
 
     def build(self) -> "Engine":
         cfg = self.config
 
-        self.buildings = grid_buildings(cfg.area, cfg.blocks, cfg.gap,
-                                        cfg.height_range,
-                                        self.env_rngs.get("env:buildings"))
+        if cfg.city_geojson:
+            from skyfleet.world.city_import import load_buildings_geojson
+            self.buildings = load_buildings_geojson(cfg.city_geojson)
+        else:
+            self.buildings = grid_buildings(cfg.area, cfg.blocks, cfg.gap,
+                                            cfg.height_range,
+                                            self.env_rngs.get("env:buildings"))
         # P1：在链路模型之上按配置叠加损伤源。没有任何损伤源时
         # wrap_with_impairments 原样返回，不引入额外对象。
         self.link_model = wrap_with_impairments(
@@ -310,6 +345,9 @@ class Engine:
             busy_nodes=frozenset(self.relay_ids),
             grounded_nodes=self.grounded)
 
+        if self._topology_enabled:
+            self._group_ids = {node_id: "main" for node_id in self.agents
+                               if node_id != self.leader_id}
         self._built = True
         return self
 
@@ -384,6 +422,91 @@ class Engine:
         """故障注入：让某节点在 t 时刻起彻底静默。"""
         self._kills.append((node_id, t))
 
+    def schedule_dispatch(self, t: float, node_ids: list[str],
+                          destination: tuple[float, float, float],
+                          group_id: str = "main",
+                          route: list[tuple[float, float, float]] | None = None,
+                          adaptive: bool = False) -> None:
+        """Schedule leader-mediated selected-node movement over the radio."""
+        ids = tuple(sorted(set(node_ids)))
+        if not ids or any(node_id not in self.nodes or node_id == self.leader_id
+                          for node_id in ids):
+            raise ValueError("dispatch requires known non-leader node IDs")
+        if (len(destination) != 3 or
+                not all(math.isfinite(float(v)) for v in destination)):
+            raise ValueError("destination must contain three finite coordinates")
+        if not isinstance(group_id, str) or not group_id.strip():
+            raise ValueError("group_id must be non-empty")
+        command_time = float(t)
+        if not math.isfinite(command_time) or command_time < 0:
+            raise ValueError("dispatch time must be finite and nonnegative")
+        checked_route = None
+        if route is not None:
+            checked_route = [tuple(map(float, point)) for point in route]
+            if any(len(point) != 3 or not all(math.isfinite(v) for v in point)
+                   for point in checked_route):
+                raise ValueError("route must contain finite xyz waypoints")
+            if not checked_route or checked_route[-1] != tuple(map(float, destination)):
+                raise ValueError("route must end at destination")
+        if not self._group_ids:
+            self._group_ids = {node_id: "main" for node_id in self.agents
+                               if node_id != self.leader_id}
+        self._dispatches.append((command_time, ids,
+                                 tuple(map(float, destination)), group_id.strip(),
+                                 checked_route, adaptive))
+        self._topology_enabled = True
+
+    def dispatch_live(self, t: float, node_ids: list[str],
+                      destination: tuple[float, float, float],
+                      group_id: str = "main", adaptive: bool = True) -> None:
+        """Schedule a radio command after the engine has started, on its thread."""
+        self.schedule_dispatch(t, node_ids, destination, group_id,
+                               adaptive=adaptive)
+        order = self._dispatches.pop()
+        self.scheduler.schedule_at(t, EV_DISPATCH, order)
+
+    def dispatch_leader_local(self, t: float,
+                              destination: tuple[float, float, float],
+                              group_id: str = "main",
+                              adaptive: bool = True) -> None:
+        """Queue local leader navigation; there is no self-directed Wi-Fi RX."""
+        if not self._topology_enabled:
+            raise ValueError("live control must be enabled")
+        if (len(destination) != 3 or
+                not all(isinstance(v, (int, float)) and math.isfinite(v)
+                        for v in destination)):
+            raise ValueError("leader destination must be finite xyz")
+        if not isinstance(group_id, str) or not group_id.strip():
+            raise ValueError("group_id must be nonempty")
+        self.scheduler.schedule_at(t, EV_LOCAL_DISPATCH,
+                                   (tuple(map(float, destination)), group_id,
+                                    adaptive))
+
+    def _on_local_dispatch(self, ev: Event) -> None:
+        destination, group_id, adaptive = ev.payload
+        node_id = self.leader_id
+        if not self.agents[node_id].alive:
+            return
+        self._group_ids[node_id] = group_id
+        self._control_routes.add(node_id)
+        if adaptive:
+            self._adaptive_targets[node_id] = destination
+            self._adaptive_modes.pop(node_id, None)
+        else:
+            self._adaptive_targets.pop(node_id, None)
+            self._adaptive_modes.pop(node_id, None)
+        self.movers[node_id].set_route([destination])
+        assert self.log is not None
+        self.log.write("CONTROL_ACCEPTED", ev.t, node_id=node_id,
+                       destination=list(destination), group_id=group_id,
+                       source="local-leader-command")
+
+    def enable_live_control(self) -> None:
+        """Enable dispatch handlers before run without preloading any orders."""
+        self._topology_enabled = True
+        self._group_ids = {node_id: "main" for node_id in self.agents
+                           if node_id != self.leader_id}
+
     def schedule_revive(self, node_id: str, t: float) -> None:
         """故障恢复：让静默的节点在 t 时刻以**新会话**重新入网。
 
@@ -396,17 +519,33 @@ class Engine:
         if not self._built:
             self.build()
         self._open_log()
-
-        self._subscribe()
-        self._start()
-
-        self.scheduler.run(until=self.config.duration)
-        # 最后一个时隙没有更晚的时刻来关闭它，收尾时必须强制结算
-        for attempt in self.channel.flush(force=True):
-            self._resolve_tx(attempt)
-        assert self.log is not None
-        self.log.close()
-        return self.config.log_path
+        try:
+            if self.config.network_backend == "ns3":
+                from skyfleet.sim.ns3_bridge import Ns3Bridge
+                self._ns3 = Ns3Bridge({n: node.pos for n, node in self.nodes.items()},
+                                      self.config.seed, buildings=self.buildings,
+                                      building_loss_db=self.config.ns3_building_loss_db)
+                self.scheduler.before_time = self._ns3_advance
+            self._subscribe()
+            self._start()
+            if self._ns3 is not None:
+                # Ensure the external clock advances to the final timestamp.
+                self.scheduler.schedule_at(self.config.duration, EV_NS3_END)
+            self.scheduler.run(until=self.config.duration)
+            if self._ns3 is None:
+                # 最后一个时隙没有更晚的时刻来关闭它，收尾时必须强制结算
+                for attempt in self.channel.flush(force=True):
+                    self._resolve_tx(attempt)
+            else:
+                self._ns3_advance(self.config.duration)
+            return self.config.log_path
+        finally:
+            if self._ns3 is not None:
+                self._ns3.close()
+                self._ns3 = None
+            self.scheduler.before_time = None
+            assert self.log is not None
+            self.log.close()
 
     def _subscribe(self) -> None:
         self.scheduler.subscribe(EV_HEARTBEAT, self._on_heartbeat)
@@ -419,17 +558,31 @@ class Engine:
         self.scheduler.subscribe(EV_REVIVE, self._on_revive)
         self.scheduler.subscribe(EV_ATTACK, self._on_attack)
         self.scheduler.subscribe(EV_CHANNEL, self._on_channel)
+        self.scheduler.subscribe(EV_ELECTION_BALLOT, self._on_election_ballot)
+        self.scheduler.subscribe(EV_ELECTION_SAFETY, self._on_election_safety)
+        if self._topology_enabled:
+            self.scheduler.subscribe(EV_DISPATCH, self._on_dispatch)
+            self.scheduler.subscribe(EV_LOCAL_DISPATCH, self._on_local_dispatch)
+            self.scheduler.subscribe(EV_TOPOLOGY, self._on_topology)
 
     def _start(self) -> None:
         cfg = self.config
         assert self.log is not None
         leader_agent = self.agents[cfg.leader_id]
 
+        terrain = None
+        if cfg.city_geojson:
+            from skyfleet.world.city_import import load_city_terrain
+            terrain = load_city_terrain(cfg.city_geojson)
         self.log.write(EventKind.SCENARIO_INIT, 0.0,
+                       **({"groups": self._group_ids} if self._topology_enabled else {}),
+                       **({"terrain": terrain} if terrain else {}),
                        area=cfg.area, duration=cfg.duration, seed=cfg.seed,
                        leader_id=cfg.leader_id,
                        buildings=[[b.rect[0], b.rect[1], b.rect[2], b.rect[3],
-                                   b.height] for b in self.buildings],
+                                   b.height, b.base_height] if b.base_height else
+                                  [b.rect[0], b.rect[1], b.rect[2], b.rect[3], b.height]
+                                  for b in self.buildings],
                        nodes=[[n.node_id, n.role.value, list(n.pos)]
                               for n in self.nodes.values()])
 
@@ -463,6 +616,11 @@ class Engine:
 
         self.leader.create_tasks(0.0)
         self.wire_leader_handlers()
+        if self._topology_enabled:
+            for node_id, agent in self.agents.items():
+                if node_id != self.leader_id:
+                    agent.handlers["FLIGHT_CORRECTION"] = self._handle_flight_correction
+            self._schedule_dispatch_orders()
 
         for node_id in self.nodes:
             self.scheduler.schedule_at(self._jitter(node_id, "hb")
@@ -488,6 +646,128 @@ class Engine:
         for node_id, t in self._revives:
             self.scheduler.schedule_at(t, EV_REVIVE, node_id)
         self.adversary.schedule(self.scheduler)
+
+    def _schedule_dispatch_orders(self) -> None:
+        for order in self._dispatches:
+            self.scheduler.schedule_at(order[0], EV_DISPATCH, order)
+        if not self.scheduler.pending() or self._last_components is None:
+            self.scheduler.schedule_at(0.0, EV_TOPOLOGY)
+
+    def _on_dispatch(self, ev: Event) -> None:
+        _, ids, destination, group_id, route, adaptive = ev.payload
+        assert self.log is not None
+        if len(ids) > 1:
+            spacing = max(self.config.slot_duration * 2, 0.01)
+            for index, node_id in enumerate(ids):
+                self.scheduler.schedule_at(
+                    ev.t + index * spacing, EV_DISPATCH,
+                    (ev.t + index * spacing, (node_id,), destination,
+                     group_id, route, adaptive))
+            return
+        leader = self.agents[self.leader_id]
+        for node_id in ids:
+            agent = self.agents[node_id]
+            if not leader.alive or not agent.alive:
+                continue
+            msg = Msg.new("FLIGHT_CORRECTION", src=self.leader_id,
+                          dst=node_id, t=ev.t, msg_id=leader.new_msg_id(),
+                          seq=leader.next_seq("FLIGHT_CORRECTION"),
+                          session_id=leader.session_id,
+                          leader_epoch=leader.leader_epoch,
+                          mission_version=leader.mission_version,
+                          payload={"destination": list(destination),
+                                   "group_id": group_id,
+                                   "adaptive": adaptive,
+                                   **({"route": [list(point) for point in route]}
+                                      if route else {})})
+            sent = leader.submit(msg, ev.t)
+            self.log.write("CONTROL_ISSUED", ev.t, node_id=node_id,
+                           msg_id=msg.msg_id, destination=list(destination),
+                           group_id=group_id, queued=sent)
+
+    def _on_control_received(self, node_id: str, msg: Msg, t: float) -> None:
+        assert self.log is not None
+        if msg.src != self.leader_id or msg.dst != node_id:
+            return
+        target = msg.payload.get("destination")
+        if (not isinstance(target, list) or len(target) != 3 or
+                not all(isinstance(v, (int, float)) and math.isfinite(v)
+                        for v in target)):
+            return
+        group_id = msg.payload.get("group_id", "main")
+        if not isinstance(group_id, str) or not group_id.strip():
+            return
+        route = msg.payload.get("route")
+        if route is None:
+            route = [target]
+        if (not isinstance(route, list) or not route or
+                any(not isinstance(point, list) or len(point) != 3 or
+                    not all(isinstance(v, (int, float)) and math.isfinite(v)
+                            for v in point) for point in route)):
+            return
+        if self._group_ids.get(node_id, "main") != group_id:
+            self.log.write("GROUP_CHANGE", t, node_id=node_id,
+                           from_group=self._group_ids.get(node_id, "main"),
+                           group_id=group_id, source="accepted-command")
+        self._group_ids[node_id] = group_id
+        self._control_routes.add(node_id)
+        if msg.payload.get("adaptive") is True:
+            self._adaptive_targets[node_id] = tuple(map(float, target))
+            self._adaptive_modes.pop(node_id, None)
+        else:
+            self._adaptive_targets.pop(node_id, None)
+            self._adaptive_modes.pop(node_id, None)
+        self.movers[node_id].set_route([tuple(map(float, point)) for point in route])
+        group_members = sorted(n for n, group in self._group_ids.items()
+                               if group == group_id)
+        self.log.write("GROUP_CHANGE", t, group_id=group_id,
+                       members=group_members, source="accepted-command")
+        self.log.write("CONTROL_ACCEPTED", t, node_id=node_id,
+                       msg_id=msg.msg_id, destination=target,
+                       group_id=self._group_ids[node_id])
+
+    def _on_topology(self, ev: Event) -> None:
+        if not self._topology_enabled:
+            return
+        assert self.log is not None and self.link_model is not None
+        ids = sorted(n for n, agent in self.agents.items() if agent.alive)
+        edges = []
+        neighbours = {n: set() for n in ids}
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                quality = self.link_model.evaluate(self.nodes[a], self.nodes[b], ev.t)
+                if not quality.obstructed and quality.quality >= self.config.loss_threshold:
+                    edges.append([a, b])
+                    neighbours[a].add(b)
+                    neighbours[b].add(a)
+        seen: set[str] = set()
+        components = []
+        for root in ids:
+            if root in seen:
+                continue
+            stack = [root]
+            seen.add(root)
+            group = []
+            while stack:
+                current = stack.pop()
+                group.append(current)
+                for neighbour in sorted(neighbours[current]):
+                    if neighbour not in seen:
+                        seen.add(neighbour)
+                        stack.append(neighbour)
+            components.append(tuple(sorted(group)))
+        result = tuple(sorted(components))
+        signature = {group_id: tuple(sorted(n for n, value in self._group_ids.items()
+                                              if value == group_id))
+                     for group_id in sorted(set(self._group_ids.values()))}
+        if result != self._last_components or signature != self._last_group_signature:
+            self.log.write("TOPOLOGY_CHANGE", ev.t, components=result,
+                           groups=signature, edges=edges,
+                           source="geometry-estimate")
+            self._last_components = result
+            self._last_group_signature = signature
+        if ev.t + 1 <= self.config.duration:
+            self.scheduler.schedule_at(ev.t + 1, EV_TOPOLOGY)
 
     def _jitter(self, node_id: str, stream: str) -> float:
         """[0,1) 抖动，用于确定各节点周期事件的初始相位。
@@ -561,6 +841,58 @@ class Engine:
     #: 而持续失联（如杀掉主节点与全部中继）必定触发。
     SAFETY_ACT_TIMEOUT_FACTOR = 10.0
 
+    def _on_election_safety(self, ev: Event) -> None:
+        """Actuate a sustained quorum failure, independent of dead leader ticks."""
+        if (not self._election_degraded or
+                self.agents[self.leader_id].alive):
+            return
+        assert self.log is not None
+        for node_id, agent in self.agents.items():
+            if node_id == self.leader_id or not agent.alive or node_id in self.grounded:
+                continue
+            if self._last_actuated.get(node_id, SafetyAction.NONE) is not SafetyAction.NONE:
+                continue
+            changed = self._actuate_safety(node_id, SafetyAction.HOVER)
+            self.log.write(EventKind.SAFETY_ACTION, ev.t, node_id=node_id,
+                           action=SafetyAction.HOVER.value,
+                           cause="ELECTION_QUORUM", actuated=changed)
+
+    def _on_election_ballot(self, ev: Event) -> None:
+        voter, candidate, epoch, old_leader = ev.payload
+        if (self.leader_id != old_leader or
+                self.agents[self.leader_id].alive or
+                not self.agents[voter].alive or
+                not self.agents[candidate].alive):
+            return
+        agent = self.agents[voter]
+        msg = Msg.new("ELECTION_VOTE", src=voter, dst=candidate, t=ev.t,
+                      msg_id=agent.new_msg_id(),
+                      seq=agent.next_seq("ELECTION_VOTE"),
+                      session_id=agent.session_id, leader_epoch=epoch,
+                      deadline=ev.t + 2 * self.config.heartbeat_period,
+                      payload={"candidate": candidate,
+                               "old_leader": old_leader})
+        agent.submit(msg, ev.t)
+
+    def _record_election_vote(self, voter: str, candidate: str,
+                              epoch: int, t: float) -> None:
+        """Record an accepted ballot, not merely a live-node estimate."""
+        if (voter in self.relay_ids or candidate in self.relay_ids or
+                voter == self.leader_id or candidate == self.leader_id or
+                voter not in self.agents or candidate not in self.agents or
+                not self.agents[voter].alive or not self.agents[candidate].alive or
+                voter in self.grounded or candidate in self.grounded or
+                epoch != self.agents[self.leader_id].leader_epoch):
+            return
+        key = (candidate, epoch)
+        votes = self._election_votes.setdefault(key, set())
+        if voter not in votes:
+            votes.add(voter)
+            assert self.log is not None
+            self.log.write(EventKind.ELECTION_VOTE, t, node_id=voter,
+                           candidate=candidate, leader_epoch=epoch,
+                           votes=len(votes))
+
     def _maybe_elect(self, t: float) -> None:
         """主节点失联时选举新主节点。
 
@@ -584,6 +916,39 @@ class Engine:
             and nid not in self.grounded and nid != self.leader_id)
         if not candidates:
             return                          # 全灭：无解，如实留空
+        if self.config.election_votes_required:
+            candidate = candidates[0]
+            epoch = self.agents[self.leader_id].leader_epoch
+            for voter_index, voter in enumerate(candidates):
+                token = (voter, epoch)
+                if token in self._election_ballot_sent:
+                    continue
+                self._election_ballot_sent.add(token)
+                agent = self.agents[voter]
+                # During bootstrap the candidate has only learned the old
+                # leader's session. Ballot senders must be recognised first.
+                self.agents[candidate].view.sessions.add(agent.session_id)
+                if voter == candidate:
+                    self._record_election_vote(voter, candidate, epoch, t)
+                    continue
+                self.scheduler.schedule_at(
+                    t + voter_index * 0.2 * self.config.heartbeat_period,
+                    EV_ELECTION_BALLOT,
+                    (voter, candidate, epoch, self.leader_id))
+            ballots = self._election_votes.get((candidate, epoch), set())
+            count = len(ballots.intersection(candidates))
+            if count < self.config.election_votes_required:
+                if not self._election_degraded:
+                    self._election_degraded = True
+                    self.log.write(EventKind.ELECTION_DEGRADED, t, node_id=candidate,
+                                   old_leader=self.leader_id, votes=count,
+                                   required=self.config.election_votes_required)
+                    self.scheduler.schedule_at(
+                        t + self.ELECTION_TIMEOUT_FACTOR * self.config.heartbeat_period,
+                        EV_ELECTION_SAFETY)
+                return
+            self._election_votes.clear()
+            self._election_degraded = False
         self._rebind_leader(candidates[0], t)
 
     def _rebind_leader(self, new_id: str, t: float) -> None:
@@ -702,11 +1067,15 @@ class Engine:
             agent = self.agents[node_id]
             if not agent.alive or mover is None:
                 continue
+            if node_id in self._adaptive_targets:
+                self._update_adaptive_route(node_id, t)
             # 按**实际位移**判定飞行状态再计费：位移是精确的，不需要
             # 从航线推测当前是在爬升还是平飞。linear 模型忽略这两个
             # 速度，因此结果与 P0/P1 逐位一致。
             before = agent.node.pos
             mover.step(dt)
+            if self._ns3 is not None:
+                self._ns3.position(node_id, agent.node.pos)
             v_h, v_z = _step_velocities(before, agent.node.pos, dt)
             agent.spend_energy(self.energy.energy_for_step(v_h, v_z, dt))
             if agent.node.energy <= 0.0 and node_id not in self._empty_batteries:
@@ -715,16 +1084,68 @@ class Engine:
             # 若把"到达任意一个航点"当成抵达，无人机会在巡航高度上
             # 直接开始投递，永远不下降进入峡谷。
             if (mover.arrived and
+                    not (node_id in self._adaptive_targets and
+                         self._adaptive_modes.get(node_id) == "HOLD") and
                     self._last_actuated.get(node_id, SafetyAction.NONE)
                     is SafetyAction.NONE):
-                self._advance_mission(node_id, t)
+                if node_id in self._control_routes:
+                    self._control_routes.discard(node_id)
+                    self._adaptive_targets.pop(node_id, None)
+                    self._adaptive_modes.pop(node_id, None)
+                    assert self.log is not None
+                    self.log.write("CONTROL_ARRIVED", t, node_id=node_id,
+                                   group_id=self._group_ids.get(node_id, "main"),
+                                   pos=list(agent.node.pos))
+                else:
+                    self._advance_mission(node_id, t)
 
         self._sample_countdown += 1
-        if self._sample_countdown * dt >= 5.0:
+        sample_period = self.config.replay_sample_period or 5.0
+        if self._sample_countdown * dt >= sample_period:
             self._sample_countdown = 0
             self._write_samples(t)
 
+        if self.live_hook is not None:
+            self.live_hook(self, t)
         self.scheduler.schedule_at(t + dt, EV_MOTION)
+
+    def _update_adaptive_route(self, node_id: str, t: float) -> None:
+        """Re-evaluate static geometry and peer occupancy at each motion tick."""
+        from skyfleet.world.geometry import adaptive_route
+
+        target = self._adaptive_targets[node_id]
+        peers = {name: agent.node.pos for name, agent in self.agents.items()
+                 if name != node_id and agent.alive and
+                 name in self._adaptive_targets and
+                 self._group_ids.get(name) == self._group_ids.get(node_id)}
+        route, mode = adaptive_route(self.nodes[node_id].pos, target,
+                                     self.buildings, peers,
+                                     node_id=node_id,
+                                     members=sorted((*peers, node_id)))
+        previous = self._adaptive_modes.get(node_id)
+        if mode != previous:
+            assert self.log is not None
+            self.log.write("FORMATION_CHANGE", t, node_id=node_id,
+                           mode=mode, group_id=self._group_ids.get(node_id),
+                           route=[list(point) for point in route])
+            self._adaptive_modes[node_id] = mode
+        mover = self.movers[node_id]
+        if mode == "HOLD":
+            if mover.route:
+                mover.set_route([])
+        elif route:
+            from skyfleet.world.geometry import _validate_passage_route
+            old_route_clear = False
+            if mover.route:
+                try:
+                    _validate_passage_route([self.nodes[node_id].pos, *mover.route],
+                                            self.buildings, target[2], 0.3)
+                    old_route_clear = True
+                except ValueError:
+                    pass
+            if (not old_route_clear or mover.route[-1] != route[-1] or
+                    mode != previous):
+                mover.set_route(route)
 
     def _on_battery_empty(self, node_id: str, t: float) -> None:
         """电量耗尽后的处置。
@@ -1100,7 +1521,70 @@ class Engine:
 
     # ================= 发送与接收 =================
 
+    def _ns3_advance(self, target: float) -> None:
+        """Import real ns-3 receptions before the next SkyFleet event."""
+        assert self._ns3 is not None
+        if target <= self._ns3.now:
+            return
+        while self._ns3.now < target - 1e-9:
+            deliveries = self._ns3.advance(target)
+            queued_receive = False
+            for rx in deliveries:
+                if rx.get("done"):
+                    self._ns3_pending.pop(rx["id"], None)
+                    self._ns3_hops.pop(rx["id"], None)
+                    continue
+                entry = self._ns3_pending.get(rx["id"])
+                if entry is None:
+                    continue
+                msg, sender, started = entry
+                receiver = self.agents.get(rx["dst"])
+                if receiver is None or receiver is sender or not receiver.alive:
+                    continue
+                if msg.dst != BROADCAST and rx["dst"] != self._ns3_hops[rx["id"]]:
+                    continue
+                if msg.dst != BROADCAST:
+                    self._ns3_pending.pop(rx["id"], None)
+                    self._ns3_hops.pop(rx["id"], None)
+                # ns-3 owns path loss / interference / MAC; SkyFleet only owns
+                # routing and higher-level protocol decisions.
+                attempt = _InjectedAttempt(t_start=started, t_end=rx["t"],
+                                           t_access=0.0, t_tx=rx["t"] - started)
+                self.scheduler.schedule_at(rx["t"], EV_RX,
+                    _Rx(msg=msg, receiver=receiver, quality=1.0,
+                        attempt=attempt, radio_from=sender.node.node_id))
+                queued_receive = True
+            if queued_receive:
+                return
+
+    def _ns3_transmit(self, msg: Msg, sender: NodeAgent, t: float) -> None:
+        assert self._ns3 is not None and self.log is not None
+        next_hop = BROADCAST if msg.dst == BROADCAST else sender.next_hop(msg)
+        if next_hop != BROADCAST and (next_hop not in self.nodes or
+                                      next_hop == sender.node.node_id):
+            self.log.write(EventKind.MSG_DROP, t, node_id=sender.node.node_id,
+                           msg_id=msg.msg_id, msg_type=msg.msg_type,
+                           dst=msg.dst, reason=DropReason.NO_ROUTE)
+            return
+        self._ns3_serial += 1
+        identifier = f"p{self._ns3_serial}"
+        self._ns3.position(sender.node.node_id, sender.node.pos)
+        self._ns3.send(identifier, sender.node.node_id, next_hop, msg.size_bits, t)
+        self._ns3_pending[identifier] = (msg, sender, t)
+        self._ns3_hops[identifier] = next_hop
+        sender.spend_energy(self.energy.tx_energy_per_bit() * msg.size_bits)
+        self.log.write(EventKind.MSG_TX, t, node_id=sender.node.node_id,
+                       msg_id=msg.msg_id, msg_type=msg.msg_type,
+                       dst=msg.dst, next_hop=next_hop, qos=msg.qos.name,
+                       rel=msg.reliability.name, bits=msg.size_bits,
+                       hop=msg.hop, route_version=msg.route_version,
+                       mission_version=msg.mission_version,
+                       network_backend="ns3", t_access=0.0, t_tx=0.0)
+
     def transmit(self, msg: Msg, sender: NodeAgent, t: float) -> None:
+        if self._ns3 is not None:
+            self._ns3_transmit(msg, sender, t)
+            return
         assert self.link_model is not None
         broadcast = msg.dst == BROADCAST
         if broadcast:
@@ -1238,6 +1722,14 @@ class Engine:
 
         if decision is not AcceptDecision.ACCEPT:
             return
+        if (msg.msg_type == "ELECTION_VOTE" and
+                self.config.election_votes_required and
+                receiver.node.node_id == msg.payload.get("candidate") and
+                msg.payload.get("old_leader") == self.leader_id and
+                msg.src != receiver.node.node_id):
+            self._record_election_vote(msg.src, receiver.node.node_id,
+                                       msg.leader_epoch, t)
+            self._maybe_elect(t)
 
         created = msg.t_created
         attempt = payload.attempt
@@ -1250,6 +1742,11 @@ class Engine:
         queue_wait = ((t_dequeue - t_enqueue)
                       if (t_dequeue is not None and t_enqueue is not None)
                       else 0.0)
+        if self.radio_observer is not None and self._ns3 is not None:
+            # Only accepted packets count; relay forwarding and geometric
+            # estimates do not create an observed ns-3 edge.
+            self.radio_observer(payload.radio_from or msg.src,
+                                receiver.node.node_id, t)
         self.log.write(
             EventKind.MSG_RX, t, node_id=receiver.node.node_id,
             msg_id=msg.msg_id, msg_type=msg.msg_type, src=msg.src,
@@ -1483,6 +1980,9 @@ class Engine:
 
     def _handle_flight_correction(self, msg: Msg, t: float,
                                   quality: float) -> None:
+        if "destination" in msg.payload:
+            self._on_control_received(msg.dst, msg, t)
+            return
         if msg.src != self.leader_id or not self.config.physics_movers:
             return
         node_id = msg.dst

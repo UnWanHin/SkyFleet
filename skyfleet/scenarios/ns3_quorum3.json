@@ -1,0 +1,24 @@
+{
+  "name": "ns3_quorum3",
+  "description": "opt-in four accepted ballot takeover or degraded election",
+  "seed": 1,
+  "duration": 10.0,
+  "log_path": "out/logs/ns3_quorum3.jsonl",
+  "network_backend": "ns3",
+  "slaves": 4,
+  "relays": 0,
+  "tasks": 0,
+  "blocks": 1,
+  "area": 100.0,
+  "election_votes_required": 4,
+  "kills": [
+    [
+      "L",
+      2.0
+    ],
+    [
+      "S4",
+      2.0
+    ]
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "type": "FeatureCollection",
+  "skyfleet_units": "metres",
+  "name": "D5 synthetic rectilinear block",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "B0",
+      "properties": {
+        "height": 60
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              40,
+              -10
+            ],
+            [
+              60,
+              -10
+            ],
+            [
+              60,
+              10
+            ],
+            [
+              40,
+              10
+            ],
+            [
+              40,
+              -10
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

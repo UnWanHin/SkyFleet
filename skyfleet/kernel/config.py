@@ -28,6 +28,9 @@ class SimConfig:
     area: float = 500.0
     blocks: int = 3
     gap: float = 20.0
+    #: Optional projected-metre GeoJSON of axis-aligned building rectangles.
+    #: When set, replaces generated grid buildings for both protocol and ns-3.
+    city_geojson: str | None = None
     #: 楼高带。高于街道、低于巡航高度，是"城市峡谷"的来源。
     height_range: tuple[float, float] = (50.0, 110.0)
     #: 节点初始所在高度带（高于多数楼顶）
@@ -52,6 +55,9 @@ class SimConfig:
     #: 近乎全有或全无，门限因此调不动。没有可比较的布点，任何「优化」都
     #: 不可验证。默认 `ring` 保持历史行为逐位不变。
     relay_layout: str = "ring"
+    #: 0 retains legacy deterministic election; positive value requires
+    #: distinct accepted votes received by the successor before takeover.
+    election_votes_required: int = 0
     #: 消息认证（HMAC + 组密钥）。**默认关闭**，与 `on_battery_empty="none"`、
     #: `energy_model="linear"` 同一模式：新机制默认不改变既有行为，因此
     #: golden digest 逐位不变，报告中已有的数字无需复核。
@@ -114,6 +120,11 @@ class SimConfig:
     #: 真实动力学（有加减速、滞后、冲过头），代价是 11 机 600 s 场景从
     #: 约 5 s 增到约 63 s（本机一次测量，随负载变化）。用于验证通信与飞行耦合。
     physics_movers: bool = False
+    #: classic: built-in slotted channel; ns3: external ns-3 ad-hoc Wi-Fi.
+    network_backend: str = "classic"
+    #: Optional additional ns-3 radio loss in dB when a building intersects
+    #: the 3D radio ray; 0 preserves the pre-building ns-3 radio behavior.
+    ns3_building_loss_db: float = 0.0
     #: 指令台限速触发阈值：最大电机转速与 omega_max 的比值。
     #: 仅在物理运动开启时生效；设为 0 可关闭远程修正。
     motor_guard_ratio: float = 0.8
@@ -122,6 +133,9 @@ class SimConfig:
     heartbeat_period: float = 1.0
     telemetry_period: float = 0.5
     motion_period: float = 0.1
+    #: Optional high-frequency position logging, for 3D replay; default
+    #: preserves the existing five-second energy samples and golden logs.
+    replay_sample_period: float | None = None
     queue_depth: int = 200
     #: 每次周期发送的时钟漂移抖动（秒，±）。
     #: 没有它，各节点的发送时刻是严格周期的固定相位，彼此几乎永不重叠——

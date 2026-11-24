@@ -57,6 +57,8 @@ class EventKind(str, enum.Enum):
     #: 新主节点宣告上任。这是故障切换的**唯一证据**：没有它，
     #: 「主节点死了之后谁在指挥」在日志里完全没有答案。
     LEADER_ANNOUNCE = "LEADER_ANNOUNCE"
+    ELECTION_VOTE = "ELECTION_VOTE"
+    ELECTION_DEGRADED = "ELECTION_DEGRADED"
     HEARTBEAT_MISS = "HEARTBEAT_MISS"
     MSG_TX = "MSG_TX"
     MSG_RX = "MSG_RX"

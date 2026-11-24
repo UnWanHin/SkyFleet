@@ -16,3 +16,10 @@ out/study/**/logs/
 
 # 临时草稿目录（探针、一次性转换、图表试作），不是产物
 .build/
+
+# Native MuJoCo warning journal and reproducible interactive run outputs.
+MUJOCO_LOG.TXT
+out/live/
+out/dispatch_d5/
+out/ns3_d5/
+out/ns3_urban/
